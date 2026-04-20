@@ -1,0 +1,170 @@
+[
+  {
+    "id": "gt_001",
+    "category": "factual_retrieval",
+    "query": "What is AMD's revenue in 2021?",
+    "expected_answer": {
+      "revenue": 16434.0,
+      "unit": "millions",
+      "year": 2021,
+      "company": "AMD"
+    },
+    "expected_sources": [
+      "AMD_2021_10K"
+    ],
+    "difficulty": "easy"
+  },
+  {
+    "id": "gt_002",
+    "category": "factual_retrieval",
+    "query": "What is Apple's gross margin in 2022?",
+    "expected_answer": {
+      "gross_margin": 43.3,
+      "unit": "percentage",
+      "year": 2022,
+      "company": "APPLE"
+    },
+    "expected_sources": [
+      "APPLE_2022_10K"
+    ],
+    "difficulty": "easy"
+  },
+  {
+    "id": "gt_003",
+    "category": "trend_analysis",
+    "query": "Show me AMD revenue trend from 2020 to 2021",
+    "expected_answer": {
+      "values": [
+        9763.0,
+        16434.0
+      ],
+      "years": [
+        2020,
+        2021
+      ],
+      "growth_rate": 68.3,
+      "trend": "upward"
+    },
+    "expected_sources": [
+      "AMD_2020_10K",
+      "AMD_2021_10K"
+    ],
+    "difficulty": "medium"
+  },
+  {
+    "id": "gt_004",
+    "category": "trend_analysis",
+    "query": "Calculate AMD's revenue CAGR from 2019 to 2021",
+    "expected_answer": {
+      "cagr": 55.0,
+      "start_year": 2019,
+      "end_year": 2021,
+      "trend": "strong growth"
+    },
+    "expected_sources": [
+      "AMD_2019_10K",
+      "AMD_2020_10K",
+      "AMD_2021_10K"
+    ],
+    "difficulty": "medium"
+  },
+  {
+    "id": "gt_005",
+    "category": "comparison",
+    "query": "Compare AMD vs Intel revenue in 2021",
+    "expected_answer": {
+      "amd_revenue": 16434.0,
+      "intel_revenue": 79000.0,
+      "leader": "Intel",
+      "ratio": 4.8
+    },
+    "expected_sources": [
+      "AMD_2021_10K",
+      "INTEL_2021_10K"
+    ],
+    "difficulty": "hard"
+  },
+  {
+    "id": "gt_006",
+    "category": "semantic_search",
+    "query": "What are AMD's main risk factors?",
+    "expected_answer": {
+      "risk_categories": [
+        "supply chain",
+        "competition",
+        "technology",
+        "market demand",
+        "intellectual property"
+      ],
+      "section_type": "risk_factors"
+    },
+    "expected_sources": [
+      "AMD_2021_10K"
+    ],
+    "difficulty": "medium"
+  },
+  {
+    "id": "gt_007",
+    "category": "semantic_search",
+    "query": "Explain Microsoft's cloud strategy",
+    "expected_answer": {
+      "topics": [
+        "Azure",
+        "cloud computing",
+        "enterprise",
+        "hybrid cloud"
+      ],
+      "section_type": "business_overview"
+    },
+    "expected_sources": [
+      "MICROSOFT_2017_10K"
+    ],
+    "difficulty": "hard"
+  },
+  {
+    "id": "gt_008",
+    "category": "trend_analysis",
+    "query": "How did AMD's gross margin change from 2020 to 2021?",
+    "expected_answer": {
+      "margin_2020": 45.0,
+      "margin_2021": 48.3,
+      "change": 3.3,
+      "trend": "improved"
+    },
+    "expected_sources": [
+      "AMD_2020_10K",
+      "AMD_2021_10K"
+    ],
+    "difficulty": "medium"
+  },
+  {
+    "id": "gt_009",
+    "category": "factual_retrieval",
+    "query": "What is Netflix's subscriber count in 2020?",
+    "expected_answer": {
+      "subscribers": 203.7,
+      "unit": "millions",
+      "year": 2020,
+      "company": "NETFLIX"
+    },
+    "expected_sources": [
+      "NETFLIX_2020_10K"
+    ],
+    "difficulty": "easy"
+  },
+  {
+    "id": "gt_010",
+    "category": "comparison",
+    "query": "Which company had higher revenue growth: AMD or Apple?",
+    "expected_answer": {
+      "amd_growth": 68.3,
+      "apple_growth": 33.0,
+      "leader": "AMD"
+    },
+    "expected_sources": [
+      "AMD_2021_10K",
+      "APPLE_2022_10K"
+    ],
+    "difficulty": "hard"
+  }
+]

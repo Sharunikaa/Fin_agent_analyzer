@@ -255,8 +255,16 @@ def step2_chromadb_retrieve(neo4j_result: Dict, query: str, parsed: Dict) -> Lis
         # When multiple companies, query PER COMPANY to guarantee diversity
         query_targets = []  # list of (where_filter, n_results)
 
+        # Use auto-tuned params if available
+        try:
+            from evals.feedback_tuner import get_params
+            _tp = get_params()
+            _tuned_top_k = _tp.get("top_k", 10)
+        except Exception:
+            _tuned_top_k = 10
+
         if parsed["companies"] and len(parsed["companies"]) > 1:
-            per_company_n = max(3, 10 // len(parsed["companies"]))
+            per_company_n = max(3, _tuned_top_k // len(parsed["companies"]))
             for company in parsed["companies"]:
                 where_clauses = [{"company": company}]
                 if parsed["years"]:
@@ -281,7 +289,7 @@ def step2_chromadb_retrieve(neo4j_result: Dict, query: str, parsed: Dict) -> Lis
                 w = where_clauses[0]
             elif len(where_clauses) > 1:
                 w = {"$and": where_clauses}
-            query_targets.append((w, 10))
+            query_targets.append((w, _tuned_top_k))
 
         for where, n_res in query_targets:
             if where:

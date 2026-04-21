@@ -1,0 +1,34 @@
+{
+  "params": {
+    "top_k": 13,
+    "rerank_top_k": 5,
+    "min_similarity": 0.45,
+    "context_window": 3,
+    "max_context_length": 4500
+  },
+  "history": [
+    {
+      "timestamp": "2026-04-21T21:15:52.559365",
+      "evals_analyzed": 16,
+      "old_params": {
+        "top_k": 10,
+        "rerank_top_k": 5,
+        "min_similarity": 0.5,
+        "context_window": 2,
+        "max_context_length": 4000
+      },
+      "new_params": {
+        "top_k": 13,
+        "rerank_top_k": 5,
+        "min_similarity": 0.45,
+        "context_window": 3,
+        "max_context_length": 4500
+      },
+      "reasons": [
+        "hallucination rate 56%",
+        "gen 0.27 with retrieval 0.89"
+      ]
+    }
+  ],
+  "last_tuned": "2026-04-21T21:15:52.559365"
+}

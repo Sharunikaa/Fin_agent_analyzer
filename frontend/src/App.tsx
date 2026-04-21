@@ -5,6 +5,7 @@ import QueryDashboard from './pages/QueryDashboard';
 import AnalyticsDashboard from './pages/AnalyticsDashboard';
 import EvaluationMonitor from './pages/EvaluationMonitor';
 import AdminPanel from './pages/AdminPanel';
+import { ThemeProvider } from './theme';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -19,19 +20,21 @@ const queryClient = new QueryClient({
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <Router>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<Navigate to="/query" replace />} />
-            <Route path="query" element={<QueryDashboard />} />
-            <Route path="analytics" element={<AnalyticsDashboard />} />
-            <Route path="evaluation" element={<EvaluationMonitor />} />
-            <Route path="admin" element={<AdminPanel />} />
-          </Route>
-        </Routes>
-      </Router>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <Router>
+          <Routes>
+            <Route path="/" element={<Layout />}>
+              <Route index element={<Navigate to="/query" replace />} />
+              <Route path="query" element={<QueryDashboard />} />
+              <Route path="analytics" element={<AnalyticsDashboard />} />
+              <Route path="evaluation" element={<EvaluationMonitor />} />
+              <Route path="admin" element={<AdminPanel />} />
+            </Route>
+          </Routes>
+        </Router>
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }
 

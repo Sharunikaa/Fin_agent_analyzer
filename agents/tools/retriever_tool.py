@@ -379,7 +379,14 @@ class EnhancedRetrieverTool:
         # STEP 3: Search ChromaDB — both filtered by section_ids AND broad company search
         if section_ids:
             print(f"\n📌 Step 3: Semantic search in ChromaDB...")
-            semantic_data = self.retrieve_semantic_data(query, section_ids, top_k=5)
+            # Use auto-tuned params if available
+            try:
+                from evals.feedback_tuner import get_params
+                tp = get_params()
+                tuned_top_k = tp.get("rerank_top_k", 5)
+            except Exception:
+                tuned_top_k = 5
+            semantic_data = self.retrieve_semantic_data(query, section_ids, top_k=tuned_top_k)
             
             # Also do a broad search by company (catches cross-references in other docs)
             broad_data = self.retrieve_semantic_data(query, [], top_k=3)

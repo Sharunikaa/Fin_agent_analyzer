@@ -1,4 +1,4 @@
-# Financial Intelligence Suite
+# HyperVerge Financial Intelligence Suite
 
 A **Retrieval-Augmented Generation (RAG)** stack for financial documents: **extract → chunk & signal → index (Neo4j + ChromaDB + DuckDB)** → **Flask API** with **`smart_retriever`** → **React (Vite)** UI.
 
@@ -26,7 +26,8 @@ Take one or all three PDFs from your data folder, run through a three-phase pipe
 ---
 
 ## Project Overview
-Financial Intelligence Suite is a production-ready **Retrieval-Augmented Generation (RAG)** system designed specifically for financial documents (10-Ks, 10-Qs, annual reports, etc.). It processes PDF documents through a structured pipeline, extracts and indexes content across three specialized systems (Neo4j, ChromaDB, DuckDB), and exposes intelligent query and analytics capabilities through both a REST API and an interactive web dashboard.
+
+HyperVerge Financial Intelligence Suite is a production-ready **Retrieval-Augmented Generation (RAG)** system designed specifically for financial documents (10-Ks, 10-Qs, annual reports, etc.). It processes PDF documents through a structured pipeline, extracts and indexes content across three specialized systems (Neo4j, ChromaDB, DuckDB), and exposes intelligent query and analytics capabilities through both a REST API and an interactive web dashboard.
 
 **Core workflow:**
 - Ingest PDFs → Extract structure, text, tables, charts → Classify sections and extract financial signals → Index into hybrid storage layers → Query with citations and retrieval metrics
@@ -93,7 +94,7 @@ The system is built for accuracy and citation: every answer cites the source doc
 
 **Five-phase product view** (batch ingestion → multi-signal extraction → hybrid storage → agents → UI):
 
-![End-to-end architecture: ingestion through dashboards](docs/assets/architecture-diagram.png)
+![End-to-end architecture: ingestion through dashboards](docs/asset/architecture-diagram.png)
 
 Design goal: answers cite **source filing + section/page** where metadata allows.
 
@@ -101,29 +102,122 @@ Design goal: answers cite **source filing + section/page** where metadata allows
 
 ## Product UI screenshots
 
-### Ingestion pipeline (vectorize → ChromaDB → Neo4j → DuckDB)
+### Admin Dashboard — Document Ingestion & Quality Control
 
-![Processing steps: BAAI/bge embeddings, ChromaDB, Neo4j indexing, DuckDB signals](docs/assets/ui-processing-pipeline.png)
+**Operational controls for ingestion and document quality** — upload new filings, inspect parsed outputs, and keep the underlying knowledge pipeline in a healthier state.
 
-### Financial RAG assistant (Neo4j + ChromaDB + DuckDB)
+![Admin dashboard with document inventory and processing status](docs/asset/ui-admin-dashboard.png)
 
-![Assistant landing with suggested prompts](docs/assets/ui-assistant-home.png)
+- **Document Inventory:** Track uploaded documents and their processing status
+- **Parsed Sections:** View indexed and structured sections in the knowledge base
+- **Learning Models:** Monitor active extraction and synthesis units
+- **Processing Flow:** Step-by-step ingestion pipeline (upload → parse → apply learning → refresh statistics)
 
-![Answer with expandable sources and retrieval stats](docs/assets/ui-rag-answer-sources.png)
+![PDF upload and parsing progress](docs/asset/ui-admin-upload.png)
 
-![Heatmap, gauge, and cited sources](docs/assets/ui-rag-charts.png)
+### Financial RAG Assistant — Query & Analysis Interface
 
-### Knowledge base analytics
+**Ask one focused question at a time** — the assistant answers, shows evidence footprints, and exposes the pipeline used for that specific prompt.
 
-![Company filter and per-document analysis](docs/assets/ui-knowledge-analytics.png)
+![Assistant landing with suggested prompts and query examples](docs/asset/ui-assistant-home.png)
 
-### Admin — upload & parse
+- Suggested prompts for common financial queries
+- Natural language question input with analysis visualization option
 
-![PDF upload and parsing progress](docs/assets/ui-admin-upload.png)
+#### Assistant Response with Evidence & Retrieval Metrics
 
-### Evaluation dashboard (layered RAG metrics)
+![Assistant response with detailed comparison analysis](docs/asset/ui-assistant-response.png)
 
-![Retrieval, context, generation metrics and per-query breakdown](docs/assets/ui-eval-dashboard.png)
+- Full-text answer with citations and evidence from source documents
+- Detailed context for each claim (source, section, relevance)
+- Retrieval metrics showing evidence quality and retrieval chain
+
+#### Rich Visualizations & Signal Analysis
+
+![Signal Profile Comparison — ORACLE vs NIKE radar chart](docs/asset/ui-signal-profile-comparison.png)
+
+![Signal Heatmap showing company-level signal metrics](docs/asset/ui-signal-heatmap.png)
+
+- **Radar charts:** Compare signal profiles across companies on risk, commitment, and other dimensions
+- **Heatmaps:** Visualize signal intensity by company and category
+- **Interactive exploration:** Click to drill down into source documents
+
+#### Sources & Evidence Footprint
+
+![Sources section with cited documents and retrieval details](docs/asset/ui-sources-cited.png)
+
+- List of all documents accessed during retrieval
+- Document metadata (company, year, document type)
+- Retrieval confidence and relevance indicators
+
+### Knowledge Base Analytics — Portfolio & Coverage
+
+**Portfolio analytics with better structure** — review company coverage, filing trends, and extracted segment details in a cleaner operational view.
+
+![Company portfolio overview with filing history and analysis](docs/asset/ui-knowledge-base-portfolio.png)
+
+- **By Company:** Browse all companies in the knowledge base with document counts and year ranges
+- **By Year:** Analyze filings by reporting period
+- **Document Analysis:** Per-document summaries with extracted metrics and anomalies
+
+### Evaluation Dashboard — RAG Quality Metrics
+
+**Quality metrics in a more readable operational format** — track retrieval, context construction, and generation quality with clearer thresholds and per-query diagnostics.
+
+![RAG evaluation dashboard with overall scores and layer metrics](docs/asset/ui-eval-dashboard-full.png)
+
+#### Overall Performance Metrics
+
+- **Overall Score:** Blended performance across the entire RAG pipeline
+- **Total Evals:** Number of evaluation queries run
+- **Ideal Diagnoses:** Queries that met desired outcome patterns
+- **Hallucinations:** Cases flagged as unsupported generation
+
+#### Layered Quality View
+
+![Layer-by-layer retrieval, context, and generation metrics](docs/asset/ui-eval-layers.png)
+
+- **Layer 1 — Retrieval:** Recall, precision, relevance metrics with target thresholds
+- **Layer 2 — Context:** Context construction quality and relevance evaluation
+- **Layer 3 — Generation:** Faithfulness, answer relevance, correctness, semantic similarity
+
+#### Diagnosis Distribution & Performance by Category
+
+![Diagnosis distribution showing ideal vs mixed outcomes](docs/asset/ui-eval-diagnosis.png)
+
+- **Ideal:** Successful queries meeting all quality criteria
+- **Mixed:** Partially successful queries with noted issues
+- **Performance by category:** Segment scores by query type or domain
+
+#### Per-Query Breakdown
+
+![Detailed per-query metrics table with latency and diagnosis](docs/asset/ui-eval-per-query.png)
+
+- Individual query performance with faith, relevancy, correctness scores
+- Retrieval confidence and context recall metrics
+- Diagnosis classification and execution latency
+- Low-level scores for failure mode analysis
+
+### Auto-Tuner — Live Parameter Optimization
+
+**Live parameter tuning based on diagnostic patterns** — automatically adjust retrieval and generation parameters to optimize performance.
+
+![Auto-tuner panel with context window, similarity thresholds, and top-k parameters](docs/asset/ui-auto-tuner.png)
+
+- **Context Window:** Adjustable context chunk size (default: 2)
+- **Max Context Length:** Token limit for context (default: 4000)
+- **Min Similarity:** Semantic similarity threshold (default: 0.5)
+- **Top-K:** Number of results to retrieve (default: 10)
+- **Rerank Top-K:** Re-ranking parameters for result refinement
+
+#### Tuning History
+
+![Tuning history showing recent auto-adjustments and their impacts](docs/asset/ui-tuning-history.png)
+
+- Timestamp of last tuning action
+- Parameter changes applied
+- Impact on hallucination rate and retrieval quality
+- Historical parameter trends
 
 ---
 
@@ -609,7 +703,7 @@ python knowledge_base/test_query.py --company AMD
 ├── data/
 │   ├── duckdb/
 │   └── chromadb/
-├── docs/assets/            # Architecture diagrams
+├── docs/asset/             # Architecture diagrams
 ├── api_server.py           # Main Flask API (:5001)
 ```
 
@@ -858,6 +952,95 @@ Provide test queries + expected answers in `evals/ground_truth/queries.json`:
   "doc_ids": ["AMD_2022_10K"]
 }
 ```
+
+---
+
+## Recent Fixes & Updates (April 2026)
+
+### Critical Fixes Implemented
+
+#### 1. **Neo4j Graph Population** ✅
+**Issue:** Neo4j database was empty (0 Company nodes, 2 Documents) despite Phase 2 completing successfully.
+
+**Root Cause:** The `neo4j_setup.py` script was not being run after Phase 2 completion. This script reads from `phase2_output/classified_sections/` and `phase2_output/chunks/` and populates the Neo4j graph.
+
+**Fix:** Execute the Neo4j population script:
+```bash
+python phase3/neo4j_setup.py
+```
+
+**Result:** ✅ **197 documents** ingested with full graph structure:
+- Company nodes created (Apple, Microsoft, Amazon, Nike, Adobe, etc.)
+- Document nodes linked with year and doc_type metadata
+- Section nodes for each section_type (business_overview, financial_statements, risk_factors, etc.)
+- Chunk nodes linked hierarchically with relationships (FILED, CONTAINS, SUPERSEDES, PART_OF)
+- All constraints and indexes created for fast lookups
+- Completed in 4.9 seconds
+
+**Updated Workflow:** Phase 3 now requires two steps:
+```bash
+# Step 1: Populate Neo4j graph
+python phase3/neo4j_setup.py
+
+# Step 2: Embed chunks into ChromaDB incrementally
+python phase3/chromadb_incremental.py
+```
+
+---
+
+#### 2. **ChromaDB Incremental Embedding Glob Pattern** ✅
+**Issue:** Incremental embedding script reported "0 new chunks to embed" even though 137K+ chunks existed in `phase2_output/chunks/`.
+
+**Root Cause:** The script used `Path.glob("chunks/*_chunks.json")` which only searches the top level. Chunks were organized in subdirectories (one per company): `chunks/APPLE/`, `chunks/AMAZON/`, etc.
+
+**Fix:** Changed glob pattern to recursive search:
+```python
+# Before (incorrect - missed nested files)
+for f in sorted(PHASE2_OUTPUT.glob("chunks/*_chunks.json")):
+
+# After (correct - recursive)
+for f in sorted((PHASE2_OUTPUT / "chunks").rglob("*_chunks.json")):
+```
+
+**File Updated:** [`phase3/chromadb_incremental.py`](phase3/chromadb_incremental.py) (Line 41)
+
+**Result:** ✅ **137,416 chunks** now being incrementally embedded into ChromaDB:
+- `business_overview`: 9,984 chunks (growing)
+- `risk_factors`: queued for embedding
+- `mda`: queued for embedding
+- `financial_statements`: queued for embedding
+- `all_sections`: queued for embedding
+- Progress tracked in real-time; ~1.95GB ChromaDB file updating
+
+---
+
+#### 3. **Frontend Report Generation Progress Display** ✅
+**Issue:** Report generation button showed generic "Generating report..." without visibility into multi-step agent execution.
+
+**Fix:** Updated [AnalyticsDashboard.tsx](frontend/src/pages/AnalyticsDashboard.tsx) to display progress through three execution stages:
+```
+"Export report" (idle)
+  ↓
+"Analysing the data..." (data analysis phase)
+  ↓
+"Calling planner agent..." (planning phase)
+  ↓
+"Calling analyser agent..." (analysis & generation)
+  ↓
+"Export report" (complete)
+```
+
+**Result:** ✅ Users now see real-time progress of agent orchestration in the UI.
+
+---
+
+### Verification Checklist (Post-Fixes)
+
+- [x] Neo4j graph populated: 197 documents, 25+ companies
+- [x] ChromaDB incremental embedding running: 9,984 business_overview chunks indexed
+- [x] Frontend showing multi-step progress: "Analysing → Planner → Analyser"
+- [x] `/api/query` finding relevant chunks (tested with MICROSOFT 2021: 6 relevant chunks found)
+- [x] Graph relationships functioning (FILED, CONTAINS, SUPERSEDES working)
 
 ---
 

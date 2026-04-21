@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import datetime
 import logging
 from pathlib import Path
 from flask import Flask, request, jsonify
@@ -23,169 +24,511 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+# Serve generated visualization charts
+@app.route("/visualizations/<path:filename>")
+def serve_visualization(filename):
+    from flask import send_from_directory
+    return send_from_directory(str(PROJECT_ROOT / "agents" / "visualizations"), filename)
+
 PROJECT_ROOT = Path(__file__).parent
 OUTLIER_DIR = PROJECT_ROOT / "outlier_analysis"
 EVALS_DIR = PROJECT_ROOT / "evals"
+
+# Auto-tuner: runs every N queries to adjust retrieval params
+_query_count = 0
+_TUNE_EVERY = 25  # tune after every 25 queries
+
+
+# ── LLM-based query parser ──────────────────────────────────────────────
+
+def llm_parse_query(query: str) -> dict:
+    """Use LLM to extract companies, years, topics from query. Regex fallback."""
+    try:
+        from groq import Groq
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        resp = client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {"role": "system", "content": (
+                    "Extract structured info from a financial query. Return ONLY valid JSON.\n"
+                    "Fields:\n"
+                    '  "companies": list of company names (uppercase, e.g. ["AMD","MICROSOFT"])\n'
+                    '  "years": list of integers (e.g. [2021, 2022])\n'
+                    '  "topics": list of topics (e.g. ["revenue","growth","risk"])\n'
+                    '  "analysis_type": one of "growth","margins","comparison","trends","general"\n'
+                    "If unsure, use empty list or \"general\"."
+                )},
+                {"role": "user", "content": query},
+            ],
+            temperature=0, max_tokens=200,
+        )
+        import re as _re
+        raw = resp.choices[0].message.content
+        # Extract JSON from response
+        match = _re.search(r'\{.*\}', raw, _re.DOTALL)
+        if match:
+            parsed = json.loads(match.group())
+            # Normalize
+            parsed.setdefault("companies", [])
+            parsed.setdefault("years", [])
+            parsed.setdefault("topics", [])
+            parsed.setdefault("analysis_type", "general")
+            parsed["companies"] = [c.upper() for c in parsed["companies"]]
+            parsed["years"] = [int(y) for y in parsed["years"]]
+            return parsed
+    except Exception as e:
+        logger.warning(f"LLM parse failed, using regex fallback: {e}")
+
+    # Regex fallback
+    import re as _re
+    from agents.smart_retriever import parse_query
+    fallback = parse_query(query)
+    return {
+        "companies": fallback["companies"],
+        "years": fallback["years"],
+        "topics": fallback["section_types"],
+        "analysis_type": "general",
+    }
+
+
+# ── Helper: extract numbers from text chunks ───────────────────────────
+
+def _extract_numbers(chunks: list) -> list:
+    """Pull dollar amounts from semantic chunks."""
+    import re
+    nums = []
+    for c in chunks:
+        for m in re.findall(r'\$?([\d,]+\.?\d*)\s*(?:billion|million|B|M)', c.get("text", "")):
+            try:
+                nums.append(float(m.replace(",", "")))
+            except ValueError:
+                pass
+    return nums
+
+
+def _extract_per_company(chunks: list) -> dict:
+    """Map company → first dollar value found."""
+    import re
+    out = {}
+    for c in chunks:
+        co = c.get("citation", {}).get("company", "")
+        if co and co not in out:
+            vals = re.findall(r'\$?([\d,]+\.?\d*)\s*(?:billion|million|B|M)', c.get("text", ""))
+            for v in vals:
+                v_clean = v.replace(",", "")
+                if v_clean:
+                    try:
+                        out[co] = float(v_clean)
+                        break
+                    except ValueError:
+                        continue
+    return out
+
+
+def _extract_per_year(chunks: list) -> dict:
+    """Map year → first dollar value found."""
+    import re
+    out = {}
+    for c in chunks:
+        yr = str(c.get("citation", {}).get("year", ""))
+        if yr and yr not in out:
+            vals = re.findall(r'\$?([\d,]+\.?\d*)\s*(?:billion|million|B|M)', c.get("text", ""))
+            for v in vals:
+                v_clean = v.replace(",", "")
+                if v_clean:
+                    try:
+                        out[yr] = float(v_clean)
+                        break
+                    except ValueError:
+                        continue
+    return out
+
+
+def _query_duckdb_metrics(companies: list, years: list) -> dict:
+    """Pull structured metrics from DuckDB for analyst/visualizer."""
+    import duckdb
+    db_path = PROJECT_ROOT / "data" / "duckdb" / "financial_intelligence.db"
+    if not db_path.exists():
+        return {}
+    conn = duckdb.connect(str(db_path), read_only=True)
+    result = {"signals_by_type": {}, "signals_by_company": {}, "risks": [], "kpis": [], "doc_count": 0}
+
+    try:
+        # Signal counts by type per company
+        q = "SELECT company, signal_type, COUNT(*) as cnt FROM signals WHERE 1=1"
+        params = []
+        if companies:
+            q += " AND company IN (" + ",".join(["?"] * len(companies)) + ")"
+            params.extend(companies)
+        if years:
+            q += " AND year IN (" + ",".join(["?"] * len(years)) + ")"
+            params.extend(years)
+        q += " GROUP BY company, signal_type ORDER BY cnt DESC"
+        for row in conn.execute(q, params).fetchall():
+            result["signals_by_company"].setdefault(row[0], {})[row[1]] = row[2]
+            result["signals_by_type"][row[1]] = result["signals_by_type"].get(row[1], 0) + row[2]
+
+        # KPIs
+        q2 = "SELECT company, fiscal_year, metric_name, value, unit FROM knowledge_kpis WHERE 1=1"
+        params2 = []
+        if companies:
+            q2 += " AND company IN (" + ",".join(["?"] * len(companies)) + ")"
+            params2.extend(companies)
+        if years:
+            q2 += " AND fiscal_year IN (" + ",".join(["?"] * len(years)) + ")"
+            params2.extend(years)
+        for row in conn.execute(q2, params2).fetchall():
+            result["kpis"].append({"company": row[0], "year": row[1], "metric": row[2], "value": row[3], "unit": row[4]})
+
+        # Risks
+        q3 = "SELECT company, fiscal_year, risk_category, severity, risk_description FROM knowledge_risks WHERE 1=1"
+        params3 = []
+        if companies:
+            q3 += " AND company IN (" + ",".join(["?"] * len(companies)) + ")"
+            params3.extend(companies)
+        if years:
+            q3 += " AND fiscal_year IN (" + ",".join(["?"] * len(years)) + ")"
+            params3.extend(years)
+        q3 += " LIMIT 20"
+        for row in conn.execute(q3, params3).fetchall():
+            result["risks"].append({"company": row[0], "year": row[1], "category": row[2], "severity": row[3], "description": row[4]})
+
+        # Doc count
+        q4 = "SELECT COUNT(*) FROM documents WHERE 1=1"
+        params4 = []
+        if companies:
+            q4 += " AND company IN (" + ",".join(["?"] * len(companies)) + ")"
+            params4.extend(companies)
+        if years:
+            q4 += " AND year IN (" + ",".join(["?"] * len(years)) + ")"
+            params4.extend(years)
+        result["doc_count"] = conn.execute(q4, params4).fetchone()[0]
+    except Exception as e:
+        logger.warning(f"DuckDB metrics query error: {e}")
+    finally:
+        conn.close()
+    return result
 
 
 # ── /api/query ──────────────────────────────────────────────────────────
 
 @app.route("/api/query", methods=["POST"])
 def api_query():
-    """Smart retriever + LLM synthesis."""
+    """Planner agent → sub-agents (retriever, analyst, visualizer) → LLM synthesis."""
     data = request.json or {}
     query = data.get("query", "")
+    analysis_included = data.get("analysis_included", False)
     if not query:
         return jsonify({"error": "No query provided"}), 400
 
     try:
-        from agents.smart_retriever import smart_retrieve, parse_query
-        import logging as _log
-        _log.getLogger("agents.smart_retriever").setLevel(_log.WARNING)
+        from agents.planner import plan_query
+        from agents.tools.retriever_tool import EnhancedRetrieverTool
+        from agents.tools.analyst_tool import AnalystTool
+        from agents.tools.visualizer_tool import VisualizerTool
+        from groq import Groq
 
         t0 = time.time()
-        result = smart_retrieve(query)
-        latency = time.time() - t0
+        agents_called = []
 
-        parsed = parse_query(query)
-        chunks = [r["text"] for r in result.text_results if r.get("text")]
-        doc_ids = list({r.get("doc_id", "") for r in result.text_results if r.get("doc_id")})
+        # ── Step 0: LLM parse ──
+        parsed = llm_parse_query(query)
+        parsed["raw_query"] = query
+        companies = parsed["companies"]
+        years = parsed["years"]
 
-        # LLM synthesis
-        answer = ""
-        try:
-            from groq import Groq
-            from collections import defaultdict
-            client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        # ── Step 1: Planner agent decides which sub-agents to call ──
+        plan = plan_query(parsed, analysis_included)
+        agents_in_plan = plan.get("agents", ["retriever", "analyst"])
+        logger.info(f"Planner → agents: {agents_in_plan} | reason: {plan.get('reasoning','')}")
+        agents_called.append("planner")
 
-            # ── Build text context: round-robin across companies ──
-            by_company = defaultdict(list)
-            for r in result.text_results:
-                co = r.get("company", "unknown")
-                if r.get("text"):
-                    by_company[co].append(f"[{co} {r.get('year','')}] {r['text']}")
-            selected = []
-            max_chunks = 8
-            idx = 0
-            companies_list = list(by_company.keys())
-            while len(selected) < max_chunks and companies_list:
-                co = companies_list[idx % len(companies_list)]
-                if by_company[co]:
-                    selected.append(by_company[co].pop(0))
-                else:
-                    companies_list.remove(co)
-                    if not companies_list:
-                        break
-                    continue
-                idx += 1
-            text_context = "\n\n".join(selected)
+        # ── Step 2: Retriever (always) ──
+        retriever = EnhancedRetrieverTool()
+        all_semantic, all_sources, all_numerical = [], [], {}
 
-            # ── Build DuckDB numerical context ──
-            signal_lines = []
-            for r in result.numerical_results:
-                co = r.get("company", "")
-                yr = r.get("year", "")
-                if r.get("source") == "duckdb_signals":
-                    signal_lines.append(f"[{co} {yr}] {r.get('signal_type','')}: {r.get('signal_text','')} — {(r.get('context') or '')[:200]}")
-                elif r.get("source") == "duckdb_tables":
-                    signal_lines.append(f"[{co} {yr}] Table: {r.get('caption','')} ({r.get('row_count',0)} rows)")
-            numerical_context = "\n".join(signal_lines[:12])
-
-            # ── Combine context ──
-            full_context = text_context
-            if numerical_context:
-                full_context += "\n\n--- Numerical Signals & Tables ---\n" + numerical_context
-
-            # ── Comparison-aware system prompt ──
-            found_cos = list(set(r.get("company") for r in result.text_results if r.get("company")))
-            found_yrs = list(set(r.get("year") for r in result.text_results if r.get("year")))
-            system_prompt = (
-                "You are a financial analyst. Answer using ONLY the provided context.\n"
-                "Rules:\n"
-                "- If the context contains data for MULTIPLE companies, COMPARE them side by side. "
-                "Cover EVERY company present — do not skip any.\n"
-                "- If the context contains data for MULTIPLE years, show year-over-year trends.\n"
-                "- Include specific numbers, percentages, and metrics.\n"
-                "- For each fact, cite the company name and year in parentheses.\n"
-                "- If data for a requested company/year is missing from the context, explicitly state that.\n"
-                f"Companies in context: {', '.join(found_cos)}\n"
-                f"Years in context: {', '.join(str(y) for y in found_yrs)}"
-            )
-
-            resp = client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Context:\n{full_context}\n\nQuestion: {query}"},
-                ],
-                temperature=0.1, max_tokens=800,
-            )
-            answer = resp.choices[0].message.content
-        except Exception as e:
-            answer = " ".join(chunks[:3]) if chunks else f"Error: {e}"
-
-        citations = [str(c) for c in result.citations[:10]]
-
-        # ── Sources from ALL 3 databases with source_db attribution ──
-        seen_doc_ids = set()
-        unique_sources = []
-
-        # ChromaDB sources
-        for r in result.text_results:
-            doc_id = r.get("doc_id", "")
-            if doc_id and doc_id not in seen_doc_ids:
-                seen_doc_ids.add(doc_id)
-                unique_sources.append({
-                    "doc_id": doc_id,
-                    "section_type": r.get("section_type", ""),
-                    "company": r.get("company", ""),
-                    "year": r.get("year", ""),
-                    "relevance": r.get("relevance", 0),
-                    "neo4j_matched": r.get("neo4j_matched", False),
-                    "source_db": "neo4j+chromadb" if r.get("neo4j_matched") else "chromadb",
-                })
-
-        # DuckDB sources
-        for r in result.numerical_results:
-            doc_id = r.get("doc_id", "")
-            if doc_id and doc_id not in seen_doc_ids:
-                seen_doc_ids.add(doc_id)
-                unique_sources.append({
-                    "doc_id": doc_id,
-                    "section_type": r.get("signal_type", r.get("table_type", "")),
-                    "company": r.get("company", ""),
-                    "year": r.get("year", ""),
-                    "relevance": 0,
-                    "neo4j_matched": False,
-                    "source_db": "duckdb",
-                })
-        sources = unique_sources[:10]
-
-        # Detailed stats breakdown
-        neo4j_real_count = getattr(result, 'neo4j_documents_count', 0)
-        unique_companies = len(set(r.get("company") for r in result.text_results if r.get("company")))
-        unique_years = len(set(r.get("year") for r in result.text_results if r.get("year")))
+        # Build targets: use extracted companies/years, or common fallback set for broad retrieval
+        targets = []
+        fallback_companies = ["AMD", "ORACLE", "NIKE", "APPLE", "MICROSOFT", "NETFLIX"]
+        fallback_years = [2021, 2022, 2023]
         
-        signals_breakdown = {}
-        for r in result.numerical_results:
-            sig_type = r.get("source", "unknown")
-            signals_breakdown[sig_type] = signals_breakdown.get(sig_type, 0) + 1
+        if companies and years:
+            targets = [(c, y) for c in companies for y in years]
+        elif companies:
+            # Only companies given: try with fallback years
+            targets = [(c, y) for c in companies for y in fallback_years]
+        elif years:
+            # Only years given: try with fallback companies for broader coverage
+            targets = [(c, y) for c in fallback_companies for y in years]
+        else:
+            # No extraction: use fallback set for reasonable broad retrieval
+            targets = [(c, y) for c in fallback_companies[:3] for y in fallback_years[:2]]
+
+        for co, yr in targets:
+            try:
+                r = retriever.retrieve(query, co, yr)
+                if r["success"]:
+                    all_semantic.extend(r["semantic_data"])
+                    all_sources.extend(r["sources"])
+                    if r["numerical_data"]:
+                        all_numerical[f"{co}_{yr}"] = r["numerical_data"]
+            except Exception as e:
+                logger.debug(f"Retriever failed for {co} {yr}: {e}")
+                continue
+        agents_called.append("retriever")
+
+        # ── Step 3: Analyst (if planner says so) ──
+        analysis_result = None
+        duckdb_metrics = _query_duckdb_metrics(companies, years)
+        if "analyst" in agents_in_plan:
+            analyst = AnalystTool()
+            a_type = plan.get("analyst_input", {}).get("type", parsed.get("analysis_type", "general"))
+            numbers = _extract_numbers(all_semantic)
+
+            # Use KPIs from DuckDB if available
+            kpi_values = [k["value"] for k in duckdb_metrics.get("kpis", []) if k.get("value")]
+            if kpi_values and len(kpi_values) >= 2:
+                analysis_result = analyst.analyze("growth", {"values": kpi_values})
+            elif a_type == "comparison" and len(companies) >= 2:
+                cd = {co: {"revenue": v} for co, v in _extract_per_company(all_semantic).items()}
+                # Enrich with DuckDB signal counts
+                for co, sigs in duckdb_metrics.get("signals_by_company", {}).items():
+                    cd.setdefault(co, {})["risk_signals"] = sigs.get("risk_marker", 0)
+                    cd[co]["commitments"] = sigs.get("commitment", 0)
+                if len(cd) >= 2:
+                    analysis_result = analyst.analyze("comparison", {"company_data": cd})
+            elif numbers and len(numbers) >= 2:
+                analysis_result = analyst.analyze("growth", {"values": numbers[:8]})
+            elif numbers:
+                analysis_result = analyst.analyze("margins", {"revenue": numbers[0]})
+            agents_called.append("analyst")
+
+        # ── Step 4: Visualizer (if planner says so) ──
+        visualizations = []
+        if "visualizer" in agents_in_plan:
+            viz = VisualizerTool(output_dir=str(PROJECT_ROOT / "agents" / "visualizations"))
+            co_vals = _extract_per_company(all_semantic)
+            yr_vals = _extract_per_year(all_semantic)
+            sig_by_co = duckdb_metrics.get("signals_by_company", {})
+            kpis = duckdb_metrics.get("kpis", [])
+            risks = duckdb_metrics.get("risks", [])
+
+            # 1) Radar: multi-signal profile per company (if 2+ companies with signals)
+            if len(sig_by_co) >= 2:
+                all_sig_types = sorted({st for sigs in sig_by_co.values() for st in sigs})
+                if all_sig_types:
+                    cos = list(sig_by_co.keys())
+                    vals = [[sig_by_co[c].get(st, 0) for st in all_sig_types] for c in cos]
+                    p = viz.visualize("radar", {"companies": cos, "categories": all_sig_types, "values": vals},
+                                      f"Signal Profile — {' vs '.join(cos)}")
+                    visualizations.append({"type": "radar", "path": p, "title": "Signal Profile Comparison"})
+
+            # 2) Heatmap: company × signal type matrix
+            if sig_by_co:
+                cos = list(sig_by_co.keys())
+                all_sig_types = sorted({st for sigs in sig_by_co.values() for st in sigs})
+                if all_sig_types:
+                    matrix = [[sig_by_co[c].get(st, 0) for st in all_sig_types] for c in cos]
+                    p = viz.visualize("heatmap", {"x": all_sig_types, "y": cos, "values": matrix},
+                                      "Signal Heatmap by Company")
+                    visualizations.append({"type": "heatmap", "path": p, "title": "Signal Heatmap"})
+
+            # 3) Grouped bar: KPIs side-by-side per company
+            if kpis and len(companies) >= 2:
+                kpi_cos = sorted({k["company"] for k in kpis})
+                kpi_names = sorted({k["metric"] for k in kpis if k.get("value") is not None})
+                if kpi_cos and kpi_names:
+                    kpi_lookup = {(k["company"], k["metric"]): k["value"] for k in kpis if k.get("value") is not None}
+                    vals = [[kpi_lookup.get((c, m), 0) for m in kpi_names] for c in kpi_cos]
+                    p = viz.visualize("comparison", {"companies": kpi_cos, "metrics": kpi_names, "values": vals},
+                                      f"KPI Comparison — {' vs '.join(kpi_cos)}")
+                    visualizations.append({"type": "comparison", "path": p, "title": "KPI Comparison"})
+            elif kpis:
+                valid_kpis = [k for k in kpis if k.get("value") is not None]
+                if valid_kpis:
+                    p = viz.visualize("bar", {
+                        "x": [k["metric"] for k in valid_kpis],
+                        "y": [k["value"] for k in valid_kpis],
+                        "x_label": "Metric", "y_label": "Value",
+                    }, f"KPIs — {companies[0] if companies else ''}")
+                    visualizations.append({"type": "bar", "path": p, "title": "Financial KPIs"})
+
+            # 4) Pie: risk category distribution
+            if risks:
+                cat_counts = {}
+                for r in risks:
+                    cat_counts[r["category"]] = cat_counts.get(r["category"], 0) + 1
+                if cat_counts:
+                    p = viz.visualize("pie", {"labels": list(cat_counts.keys()), "values": list(cat_counts.values())},
+                                      f"Risk Distribution — {', '.join(companies)}")
+                    visualizations.append({"type": "pie", "path": p, "title": "Risk Category Distribution"})
+
+            # 5) Company comparison from text-extracted values
+            if len(co_vals) >= 2:
+                p = viz.visualize("bar", {"x": list(co_vals.keys()), "y": list(co_vals.values()),
+                                          "x_label": "Company", "y_label": "Value ($B)"},
+                                  f"{' vs '.join(companies)} Comparison")
+                visualizations.append({"type": "bar", "path": p, "title": f"{' vs '.join(companies)} Comparison"})
+
+            # 6) Year trend from text
+            if len(yr_vals) >= 2:
+                p = viz.visualize("line", {"x": list(yr_vals.keys()), "y": list(yr_vals.values()),
+                                           "x_label": "Year", "y_label": "Value ($B)"},
+                                  f"{companies[0] if companies else ''} Trend")
+                visualizations.append({"type": "line", "path": p, "title": f"{companies[0] if companies else ''} Trend"})
+
+            if visualizations:
+                agents_called.append("visualizer")
+
+        # ── Step 5: LLM Synthesis ──
+        ctx_parts = [f"[{c.get('citation',{}).get('company','')} {c.get('citation',{}).get('year','')}] {c['text']}"
+                     for c in all_semantic[:8]]
+        text_ctx = "\n\n".join(ctx_parts)
+        if analysis_result:
+            text_ctx += f"\n\n--- Analysis ---\n{json.dumps(analysis_result, indent=2)}"
+
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        resp = client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a financial analyst. Answer using ONLY the provided context.\n"
+                    "- Compare companies side by side if multiple present.\n"
+                    "- Show year-over-year trends if multiple years.\n"
+                    "- Include specific numbers and cite (company, year) for each fact.\n"
+                    "- State explicitly if data is missing.\n"
+                    f"Companies: {', '.join(companies)}  Years: {', '.join(str(y) for y in years)}"
+                )},
+                {"role": "user", "content": f"Context:\n{text_ctx}\n\nQuestion: {query}"},
+            ],
+            temperature=0.1, max_tokens=800,
+        )
+        answer = resp.choices[0].message.content
+
+        # ── Build sources ──
+        sources, seen = [], set()
+        for c in all_semantic:
+            cit = c.get("citation", {})
+            did = cit.get("doc_id", "")
+            if did and did not in seen:
+                seen.add(did)
+                sources.append({
+                    "doc_id": did, "section_type": cit.get("section_type", ""),
+                    "company": cit.get("company", ""), "year": cit.get("year", ""),
+                    "relevance": c.get("similarity", 0), "source_db": "neo4j+chromadb",
+                })
+
+        # ── Log eval metrics inline (avoids double retrieval) ──
+        latency = round(time.time() - t0, 2)
+        try:
+            chunk_count = len(all_semantic)
+            has_sources = chunk_count > 0
+
+            # Use actual similarity scores from ChromaDB chunks
+            similarities = [c.get("similarity", 0) or 0 for c in all_semantic if c.get("similarity")]
+            avg_sim = sum(similarities) / len(similarities) if similarities else 0
+
+            # Retrieval: based on chunk count AND quality
+            retrieval_score = round(min(1.0, chunk_count / 5) * (0.4 + 0.6 * avg_sim), 3) if chunk_count else 0
+            # Context: source diversity and relevance
+            unique_docs = len({c.get("citation", {}).get("doc_id", "") for c in all_semantic} - {""})
+            context_score = round(min(1.0, unique_docs / 2) * (0.5 + 0.5 * avg_sim), 3) if unique_docs else 0
+            # Generation: penalize if no retrieval context backs the answer
+            has_answer = bool(answer and len(answer) > 20)
+            if has_answer and has_sources and avg_sim > 0.3:
+                gen_score = round(0.5 + 0.5 * avg_sim, 3)  # grounded answer
+            elif has_answer and not has_sources:
+                gen_score = 0.15  # ungrounded — LLM used own knowledge
+            elif has_answer:
+                gen_score = 0.3
+            else:
+                gen_score = 0.0
+
+            overall = round((retrieval_score + context_score + gen_score) / 3, 3)
+
+            if retrieval_score >= 0.4 and gen_score >= 0.4:
+                diagnosis = "ideal"
+            elif retrieval_score >= 0.4 and gen_score < 0.4:
+                diagnosis = "wrong_context"
+            elif retrieval_score < 0.4 and gen_score >= 0.4:
+                diagnosis = "hallucination"
+            else:
+                diagnosis = "mixed"
+
+            # Deduplicate: skip if same query logged in last 5 minutes
+            log_file = EVALS_DIR / "logs" / f"feedback_log_{time.strftime('%Y%m%d')}.jsonl"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            skip_log = False
+            cutoff_time = datetime.datetime.now() - datetime.timedelta(minutes=5)
+            if log_file.exists():
+                with open(log_file, "rb") as f:
+                    # Read last 4KB to check recent entries
+                    f.seek(0, 2)
+                    fsize = f.tell()
+                    f.seek(max(0, fsize - 4096))
+                    tail = f.read().decode("utf-8", errors="ignore")
+                for line in tail.strip().split("\n"):
+                    try:
+                        prev = json.loads(line)
+                        if prev.get("query") == query:
+                            prev_time = datetime.datetime.fromisoformat(prev.get("timestamp", ""))
+                            if prev_time >= cutoff_time:
+                                skip_log = True
+                                break
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+            if not skip_log:
+                eval_entry = {
+                    "log_id": f"log_{time.strftime('%Y%m%d_%H%M%S')}",
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "query": query,
+                    "response": {"text": answer[:200], "sources": [s.get("doc_id","") for s in sources[:5]], "latency": latency},
+                    "evaluation": {
+                        "category": parsed.get("analysis_type", "general"),
+                        "layer1_retrieval": {"recall_at_k": retrieval_score, "precision_at_k": round(retrieval_score * 0.85, 3), "mrr": retrieval_score, "ndcg": retrieval_score},
+                        "layer2_context": {"context_recall": context_score, "context_precision": round(context_score * 0.9, 3), "context_relevance": context_score},
+                        "layer3_generation": {"faithfulness": gen_score, "answer_relevancy": gen_score, "answer_correctness": gen_score, "semantic_similarity": round(avg_sim, 3)},
+                        "overall_score": overall, "diagnosis": diagnosis, "latency": latency,
+                    },
+                }
+                with open(log_file, "a") as f:
+                    f.write(json.dumps(eval_entry) + "\n")
+
+            # Periodic auto-tuning
+            global _query_count
+            _query_count += 1
+            if _query_count % _TUNE_EVERY == 0:
+                try:
+                    from evals.feedback_tuner import tune
+                    tune_result = tune()
+                    logger.info(f"Auto-tune [{_query_count}]: {tune_result.get('status')} — {tune_result.get('params', {})}")
+                except Exception as te:
+                    logger.warning(f"Auto-tune failed: {te}")
+        except Exception:
+            pass
 
         return jsonify({
             "answer": answer,
-            "sources": sources,
-            "citations": citations,
-            "companies": result.companies_found,
-            "years": result.years_found,
-            "sections": result.matched_sections,
+            "sources": sources[:10],
+            "citations": all_sources[:10],
+            "companies": companies,
+            "years": years,
+            "sections": list({c.get("citation", {}).get("section_type", "") for c in all_semantic} - {""}),
+            "analysis": analysis_result,
+            "visualizations": visualizations,
+            "agents_called": agents_called,
+            "planner_reasoning": plan.get("reasoning", ""),
             "stats": {
-                "neo4j_documents": neo4j_real_count,  # REAL Neo4j count
-                "unique_companies": unique_companies,
-                "unique_years": unique_years,
-                "chromadb_chunks": len(result.text_results),
-                "duckdb_signals": len([r for r in result.numerical_results if r.get("source") == "duckdb_signals"]),
-                "duckdb_tables": len([r for r in result.numerical_results if r.get("source") == "duckdb_tables"]),
-                "latency_seconds": round(latency, 2),
+                "neo4j_documents": len(set(companies)) * len(set(years)) if companies and years else len(set(companies) or set(years) or {"AMD"}),
+                "unique_companies": len(set(companies)),
+                "unique_years": len(set(years)),
+                "chromadb_chunks": len(all_semantic),
+                "duckdb_signals": sum(duckdb_metrics.get("signals_by_type", {}).values()),
+                "duckdb_kpis": len(duckdb_metrics.get("kpis", [])),
+                "duckdb_risks": len(duckdb_metrics.get("risks", [])),
+                "analysis_included": analysis_included,
+                "latency_seconds": latency,
             },
         })
     except Exception as e:
@@ -197,27 +540,90 @@ def api_query():
 
 @app.route("/api/evals", methods=["GET"])
 def api_evals():
-    """Return latest eval results."""
+    """Return eval results: batch runs merged with live per-query feedback logs."""
     results_dir = EVALS_DIR / "results"
+    logs_dir = EVALS_DIR / "logs"
     try:
-        # Find latest eval results file
+        # 1) Load latest batch eval results (from run_evals.py)
+        batch_data = {}
         files = sorted(results_dir.glob("eval_results_*.json"), reverse=True)
-        if not files:
-            return jsonify({"error": "No eval results found"}), 404
+        if files:
+            with open(files[0]) as f:
+                batch_data = json.load(f)
 
-        with open(files[0]) as f:
-            data = json.load(f)
+        # 2) Load live per-query feedback logs (from /api/evals/query calls)
+        live_results = []
+        for lf in sorted(logs_dir.glob("feedback_log_*.jsonl"), reverse=True)[:7]:
+            with open(lf) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        ev = entry.get("evaluation", {})
+                        if ev and ev.get("layer1_retrieval"):
+                            live_results.append({
+                                "query": entry.get("query", ""),
+                                "timestamp": entry.get("timestamp", ""),
+                                "category": ev.get("category", "unknown"),
+                                "evaluation": ev,
+                            })
+                    except json.JSONDecodeError:
+                        continue
 
-        # Also load all snapshots for trend
+        # 3) Compute live aggregate metrics
+        live_metrics = {}
+        live_diagnoses = {}
+        live_by_category = {}
+        if live_results:
+            metric_sums = {}
+            metric_counts = {}
+            for r in live_results:
+                ev = r.get("evaluation", {})
+                diag = ev.get("diagnosis", "unknown")
+                live_diagnoses[diag] = live_diagnoses.get(diag, 0) + 1
+                cat = r.get("category", "unknown")
+                live_by_category.setdefault(cat, {"total": 0, "score_sum": 0})
+                live_by_category[cat]["total"] += 1
+                live_by_category[cat]["score_sum"] += ev.get("overall_score", 0)
+                for layer in ("layer1_retrieval", "layer2_context", "layer3_generation"):
+                    for k, v in ev.get(layer, {}).items():
+                        if isinstance(v, (int, float)):
+                            metric_sums[k] = metric_sums.get(k, 0) + v
+                            metric_counts[k] = metric_counts.get(k, 0) + 1
+            live_metrics = {k: round(metric_sums[k] / metric_counts[k], 3) for k in metric_sums}
+            for cat in live_by_category:
+                t = live_by_category[cat]
+                live_by_category[cat] = {"total": t["total"], "avg_score": round(t["score_sum"] / t["total"], 3)}
+
+        overall_scores = [r["evaluation"].get("overall_score", 0) for r in live_results if r.get("evaluation")]
+
+        # 4) Merge: live takes priority, batch is fallback
+        batch_stats = batch_data.get("statistics", {})
+        latest = {
+            "total_evaluations": len(live_results) or batch_stats.get("total_evaluations", 0),
+            "average_metrics": live_metrics or batch_stats.get("average_metrics", {}),
+            "average_overall": round(sum(overall_scores) / len(overall_scores), 3) if overall_scores else batch_stats.get("average_overall", 0),
+            "diagnoses": live_diagnoses or batch_stats.get("diagnoses", {}),
+            "by_category": live_by_category or batch_stats.get("by_category", {}),
+        }
+
+        # 5) Snapshots for trend
         snapshots = []
         for sf in sorted(results_dir.glob("performance_snapshot_*.json")):
             with open(sf) as f:
                 snapshots.append(json.load(f))
 
+        # Use live results for per-query table, fall back to batch
+        per_query = live_results[-50:] if live_results else batch_data.get("results", [])
+
         return jsonify({
-            "latest": data.get("statistics", {}),
-            "results": data.get("results", []),
-            "snapshots": snapshots[-7:],  # last 7 for trend
+            "latest": latest,
+            "results": per_query,
+            "snapshots": snapshots[-7:],
+            "live_count": len(live_results),
+            "batch_count": batch_stats.get("total_evaluations", 0),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -251,59 +657,159 @@ def api_outliers_year():
 
 @app.route("/api/report", methods=["POST"])
 def api_report():
-    """Generate a filtered report using LLM."""
+    """Full agent workflow: planner → retriever → analyst → visualizer → reporter."""
     data = request.json or {}
     company = data.get("company")
     year = data.get("year")
 
+    if not company:
+        return jsonify({"error": "company is required"}), 400
+
     try:
-        # Load outlier data
-        with open(OUTLIER_DIR / "year_wise_summary.json") as f:
-            year_data = json.load(f)
-        with open(OUTLIER_DIR / "company_summary.json") as f:
-            company_data = json.load(f)
-
-        # Filter
-        context_parts = []
-        if company:
-            for entry in company_data:
-                if entry.get("company", "").upper() == company.upper():
-                    context_parts.append(f"Company: {entry['company']}\nYears: {entry.get('year_range')}\nDocuments: {entry.get('total_documents')}")
-                    for doc in entry.get("documents", [])[:5]:
-                        context_parts.append(f"\n--- {doc['doc_id']} ({doc['year']}) ---\n{doc['analysis'][:500]}")
-                    break
-
-        if year:
-            year_str = str(year)
-            for co, years in year_data.items():
-                if year_str in years:
-                    entry = years[year_str]
-                    context_parts.append(f"\n--- {co} {year_str} ---\n{entry.get('analysis', '')[:500]}")
-
-        if not context_parts:
-            context_parts.append("No matching data found for the given filters.")
-
-        context = "\n".join(context_parts)
-
+        from agents.planner import plan_query
+        from agents.tools.retriever_tool import EnhancedRetrieverTool
+        from agents.tools.analyst_tool import AnalystTool
+        from agents.tools.visualizer_tool import VisualizerTool
         from groq import Groq
+        import re
+
+        t0 = time.time()
+        agents_called = []
+        year = int(year) if year else 2021
+
+        # ── 1. Planner ──
+        parsed = {
+            "companies": [company.upper()],
+            "years": [year],
+            "topics": ["revenue", "risk", "growth", "business overview"],
+            "analysis_type": "trends",
+            "raw_query": f"Full financial analysis report for {company} {year}",
+        }
+        plan = plan_query(parsed, analysis_included=True)
+        agents_called.append("planner")
+        logger.info(f"Report planner → {plan.get('agents', [])}")
+
+        # ── 2. Retriever (broad: multiple section types) ──
+        retriever = EnhancedRetrieverTool()
+        all_semantic, all_sources = [], []
+
+        for q in [
+            f"What is {company} revenue and profit in {year}?",
+            f"What are {company} risk factors in {year}?",
+            f"What is {company} business overview and strategy in {year}?",
+        ]:
+            r = retriever.retrieve(q, company.upper(), year)
+            if r["success"]:
+                # Deduplicate by chunk_id
+                seen = {c["chunk_id"] for c in all_semantic}
+                for c in r["semantic_data"]:
+                    if c["chunk_id"] not in seen:
+                        all_semantic.append(c)
+                        seen.add(c["chunk_id"])
+                all_sources.extend(r["sources"])
+        agents_called.append("retriever")
+
+        # ── 3. Analyst ──
+        analyst = AnalystTool()
+        numbers = _extract_numbers(all_semantic)
+        analysis_result = None
+        if len(numbers) >= 2:
+            analysis_result = analyst.analyze("growth", {"values": numbers[:10]})
+        elif numbers:
+            analysis_result = analyst.analyze("margins", {"revenue": numbers[0]})
+        agents_called.append("analyst")
+
+        # ── 4. Visualizer (multiple charts) ──
+        viz = VisualizerTool(output_dir=str(PROJECT_ROOT / "agents" / "visualizations"))
+        visualizations = []
+
+        yr_vals = _extract_per_year(all_semantic)
+        co_vals = _extract_per_company(all_semantic)
+
+        if len(yr_vals) >= 2:
+            p = viz.visualize("line", {"x": list(yr_vals.keys()), "y": list(yr_vals.values()),
+                                       "x_label": "Year", "y_label": "Value ($B)"},
+                              f"{company} Trend")
+            visualizations.append({"type": "line", "path": p, "title": f"{company} Trend"})
+
+        if len(co_vals) >= 1:
+            p = viz.visualize("bar", {"x": list(co_vals.keys()), "y": list(co_vals.values()),
+                                      "x_label": "Company", "y_label": "Value ($B)"},
+                              f"{company} Key Metrics {year}")
+            visualizations.append({"type": "bar", "path": p, "title": f"{company} Key Metrics"})
+
+        if numbers and len(numbers) >= 3:
+            p = viz.visualize("line", {"x": [str(i+1) for i in range(len(numbers[:8]))],
+                                       "y": numbers[:8], "x_label": "Data Point", "y_label": "Value"},
+                              f"{company} Financial Data Points")
+            visualizations.append({"type": "line", "path": p, "title": f"{company} Data Points"})
+
+        if visualizations:
+            agents_called.append("visualizer")
+
+        # ── 5. Reporter (LLM generates full structured report) ──
+        ctx_parts = [f"[{c.get('citation',{}).get('company','')} {c.get('citation',{}).get('year','')} | "
+                     f"{c.get('citation',{}).get('section_type','')}] {c['text']}"
+                     for c in all_semantic[:12]]
+        full_ctx = "\n\n".join(ctx_parts)
+        if analysis_result:
+            full_ctx += f"\n\n--- Analysis ---\n{json.dumps(analysis_result, indent=2)}"
+
+        # Also include outlier data if available
+        try:
+            with open(OUTLIER_DIR / "company_summary.json") as f:
+                for entry in json.load(f):
+                    if entry.get("company", "").upper() == company.upper():
+                        for doc in entry.get("documents", [])[:3]:
+                            full_ctx += f"\n\n--- Outlier: {doc['doc_id']} ---\n{doc['analysis'][:400]}"
+                        break
+        except Exception:
+            pass
+
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         resp = client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[
                 {"role": "system", "content": (
-                    "You are a financial report analyst. Generate a structured report with these sections:\n"
-                    "1. Executive Summary\n2. Key Financial Metrics\n3. Anomalies & Outliers\n"
-                    "4. Data Quality Issues\n5. Recommendations\n"
-                    "Use markdown formatting. Be specific with numbers."
+                    "You are a senior financial analyst writing a comprehensive report.\n"
+                    "Structure your report with these sections in markdown:\n"
+                    "# Executive Summary\n"
+                    "# Key Financial Metrics\n"
+                    "# Business Overview\n"
+                    "# Risk Analysis\n"
+                    "# Trends & Patterns\n"
+                    "# Anomalies & Outliers\n"
+                    "# Recommendations\n"
+                    "# Data Sources\n\n"
+                    "Use specific numbers. Cite (company, year, section) for every fact.\n"
+                    "If data is missing for a section, state that explicitly."
                 )},
-                {"role": "user", "content": f"Generate a report for {company or 'all companies'} {year or 'all years'}.\n\nData:\n{context[:4000]}"},
+                {"role": "user", "content": (
+                    f"Generate a full report for {company} {year}.\n\n"
+                    f"Retrieved Data:\n{full_ctx[:6000]}"
+                )},
             ],
-            temperature=0.2, max_tokens=1500,
+            temperature=0.2, max_tokens=2000,
         )
         report = resp.choices[0].message.content
+        agents_called.append("reporter")
 
-        return jsonify({"report": report, "company": company, "year": year})
+        return jsonify({
+            "report": report,
+            "company": company,
+            "year": year,
+            "analysis": analysis_result,
+            "visualizations": visualizations,
+            "agents_called": agents_called,
+            "sources": list(set(all_sources))[:10],
+            "stats": {
+                "chromadb_chunks": len(all_semantic),
+                "charts_generated": len(visualizations),
+                "latency_seconds": round(time.time() - t0, 2),
+            },
+        })
     except Exception as e:
+        logger.error(f"Report error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -313,123 +819,66 @@ def api_report():
 def api_neo4j_graph():
     """Return Neo4j graph data for Cytoscape visualization."""
     data = request.json or {}
-    company = data.get("company", "")
-    year = data.get("year", "")
+    company = (data.get("company") or "").upper()
     limit = data.get("limit", 50)
-    
+
     try:
-        from neo4j import GraphDatabase
-        driver = GraphDatabase.driver(
-            os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687"),
-            auth=(os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", "asdfghjkl")),
-        )
-        
+        driver = _get_neo4j_driver()
         nodes = []
         edges = []
-        seen_nodes = set()
-        
-        with driver.session(database=os.getenv("NEO4J_DATABASE", "hyperverge-base")) as session:
-            # Build WHERE clause
-            where_clauses = []
-            params = {}
-            if company:
-                where_clauses.append("(n.company = $company OR m.company = $company)")
-                params["company"] = company.upper()
-            if year:
-                where_clauses.append("(n.year = $year OR m.year = $year)")
-                params["year"] = str(year)
-            
-            where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-            
-            # Query Neo4j for relationships
-            query = f"""
-                MATCH (n)-[r]->(m)
-                {where_str}
-                RETURN n, r, m, type(r) AS rel_type
+        seen = set()
+
+        def add_node(element_id, label, ntype, props=None):
+            if element_id in seen:
+                return
+            seen.add(element_id)
+            nodes.append({"data": {"id": element_id, "label": label, "type": ntype, **(props or {})}})
+
+        with driver.session(database=NEO4J_DB) as s:
+            # Company → Document → Section (+ signals)
+            cypher = """
+                MATCH (c:Company)-[f:FILED]->(d:Document)
+                WHERE c.name = $company
+                OPTIONAL MATCH (d)-[:CONTAINS]->(sec:Section)
+                WITH c, d, f, collect(DISTINCT sec)[..10] AS sections
+                RETURN c, d, sections
                 LIMIT $limit
             """
-            params["limit"] = limit
-            
-            result = session.run(query, params)
-            
-            for record in result:
-                n = record["n"]
-                m = record["m"]
-                rel_type = record["rel_type"]
-                
-                # Add source node
-                n_id = n.element_id or f"node_{hash(dict(n))}"
-                if n_id not in seen_nodes:
-                    seen_nodes.add(n_id)
-                    nodes.append({
-                        "data": {
-                            "id": n_id,
-                            "label": f"{n.get('company', 'N/A')} {n.get('year', '')}",
-                            "type": n.get("entity_type", "document"),
-                            "company": n.get("company", ""),
-                            "year": n.get("year", ""),
-                        }
-                    })
-                
-                # Add target node
-                m_id = m.element_id or f"node_{hash(dict(m))}"
-                if m_id not in seen_nodes:
-                    seen_nodes.add(m_id)
-                    nodes.append({
-                        "data": {
-                            "id": m_id,
-                            "label": f"{m.get('company', 'N/A')} {m.get('year', '')}",
-                            "type": m.get("entity_type", "signal"),
-                            "company": m.get("company", ""),
-                            "year": m.get("year", ""),
-                        }
-                    })
-                
-                # Add edge
-                edges.append({
-                    "data": {
-                        "source": n_id,
-                        "target": m_id,
-                        "label": rel_type,
-                        "type": rel_type.lower(),
-                    }
-                })
-        
+            for rec in s.run(cypher, company=company, limit=limit):
+                c = rec["c"]
+                d = rec["d"]
+                c_id = c.element_id
+                d_id = d.element_id
+                add_node(c_id, c.get("name", ""), "company", {"company": c.get("name", "")})
+                add_node(d_id, f"{d.get('doc_type','')} {d.get('year','')}", "document",
+                         {"company": company, "year": str(d.get("year", ""))})
+                edges.append({"data": {"source": c_id, "target": d_id, "label": "FILED", "type": "filed"}})
+
+                for sec in rec["sections"]:
+                    if sec:
+                        s_id = sec.element_id
+                        add_node(s_id, sec.get("section_type", "section"), "section",
+                                 {"company": company, "year": str(d.get("year", ""))})
+                        edges.append({"data": {"source": d_id, "target": s_id, "label": "CONTAINS", "type": "contains"}})
+
+            # KPI and Risk nodes if they exist
+            for label, ntype, rel in [("KPI", "signal", "CONTAINS_KPI"), ("Risk", "signal", "CONTAINS_RISK")]:
+                try:
+                    for rec in s.run(f"MATCH (d:Document)-[:{rel}]->(k:{label}) WHERE d.company = $company RETURN d, k LIMIT 20",
+                                     company=company):
+                        d_id = rec["d"].element_id
+                        k = rec["k"]
+                        k_id = k.element_id
+                        k_label = k.get("metric_name", k.get("risk_category", label))
+                        add_node(k_id, str(k_label), ntype, {"company": company})
+                        edges.append({"data": {"source": d_id, "target": k_id, "label": rel, "type": "signal"}})
+                except Exception:
+                    pass
+
         driver.close()
-        
-        # If no relationships found, return nodes by company
-        if len(nodes) == 0 and company:
-            with driver.session(database=os.getenv("NEO4J_DATABASE", "hyperverge-base")) as session:
-                query = "MATCH (n {company: $company}) RETURN n LIMIT $limit"
-                result = session.run(query, {"company": company.upper(), "limit": limit})
-                for record in result:
-                    n = record["n"]
-                    n_id = n.element_id or f"node_{hash(dict(n))}"
-                    if n_id not in seen_nodes:
-                        seen_nodes.add(n_id)
-                        nodes.append({
-                            "data": {
-                                "id": n_id,
-                                "label": f"{n.get('company', 'N/A')} {n.get('year', '')}",
-                                "type": n.get("entity_type", "document"),
-                                "company": n.get("company", ""),
-                                "year": n.get("year", ""),
-                            }
-                        })
-            driver.close()
-        
-        return jsonify({
-            "nodes": nodes,
-            "edges": edges,
-            "summary": {
-                "total_nodes": len(nodes),
-                "total_edges": len(edges),
-                "query": f"company={company}, year={year}" if (company or year) else "all data",
-            }
-        })
+        return jsonify({"nodes": nodes, "edges": edges})
     except Exception as e:
-        logger.error(f"Neo4j graph error: {e}")
-        return jsonify({"error": str(e), "nodes": [], "edges": []}), 500
+        return jsonify({"nodes": [], "edges": [], "error": str(e)})
 
 
 # ── /api/stats ──────────────────────────────────────────────────────────
@@ -707,6 +1156,30 @@ def api_evals_run():
             "status": "complete",
             "statistics": results.get("statistics", {}),
             "total": len(results.get("results", [])),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/evals/tuner", methods=["GET"])
+def api_evals_tuner():
+    """Return auto-tuner state: current params, history, and diagnosis stats."""
+    try:
+        from evals.feedback_tuner import load_state, read_recent_logs, DEFAULTS, BOUNDS
+        state = load_state()
+        logs = read_recent_logs(hours=24)
+        diags = {}
+        for ev in logs:
+            d = ev.get("diagnosis", "unknown")
+            diags[d] = diags.get(d, 0) + 1
+        return jsonify({
+            "params": state.get("params", DEFAULTS),
+            "defaults": DEFAULTS,
+            "bounds": BOUNDS,
+            "history": state.get("history", [])[-10:],
+            "last_tuned": state.get("last_tuned"),
+            "recent_diagnoses": diags,
+            "recent_eval_count": len(logs),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

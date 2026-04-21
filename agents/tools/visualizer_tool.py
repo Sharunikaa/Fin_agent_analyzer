@@ -150,32 +150,75 @@ class VisualizerTool:
         fig.write_html(str(filepath))
         
         return str(filepath)
-    
+
+    def create_radar_chart(self, data: Dict, title: str = "Risk Profile") -> str:
+        """Radar/spider chart for multi-dimensional company profiles."""
+        companies = data.get('companies', [])
+        categories = data.get('categories', [])
+        values = data.get('values', [])
+        if not companies or not categories or not values:
+            return "Error: Need 'companies', 'categories', and 'values'"
+        fig = go.Figure()
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+        for i, co in enumerate(companies):
+            v = values[i] if i < len(values) else [0] * len(categories)
+            fig.add_trace(go.Scatterpolar(
+                r=v + [v[0]], theta=categories + [categories[0]],
+                fill='toself', name=co, opacity=0.6,
+                line=dict(color=colors[i % len(colors)]),
+            ))
+        fig.update_layout(title=title, polar=dict(radialaxis=dict(visible=True)),
+                          template='plotly_white', height=500)
+        fp = self.output_dir / f"radar_{len(list(self.output_dir.glob('*.html')))}.html"
+        fig.write_html(str(fp))
+        return str(fp)
+
+    def create_heatmap_chart(self, data: Dict, title: str = "Signal Heatmap") -> str:
+        """Heatmap for company × metric intensity."""
+        x_labels = data.get('x', [])
+        y_labels = data.get('y', [])
+        values = data.get('values', [])
+        if not x_labels or not y_labels or not values:
+            return "Error: Need 'x', 'y', and 'values'"
+        fig = go.Figure(data=go.Heatmap(
+            z=values, x=x_labels, y=y_labels,
+            colorscale='RdYlGn_r', texttemplate='%{z}', textfont=dict(size=12),
+        ))
+        fig.update_layout(title=title, template='plotly_white', height=max(350, 80 * len(y_labels)))
+        fp = self.output_dir / f"heatmap_{len(list(self.output_dir.glob('*.html')))}.html"
+        fig.write_html(str(fp))
+        return str(fp)
+
+    def create_pie_chart(self, data: Dict, title: str = "Distribution") -> str:
+        """Pie/donut chart for proportional breakdowns."""
+        labels = data.get('labels', data.get('x', []))
+        values = data.get('values', data.get('y', []))
+        if not labels or not values:
+            return "Error: Need 'labels'/'x' and 'values'/'y'"
+        fig = go.Figure(data=go.Pie(
+            labels=labels, values=values, hole=0.4,
+            textinfo='label+percent', marker=dict(line=dict(color='white', width=2)),
+        ))
+        fig.update_layout(title=title, template='plotly_white', height=450)
+        fp = self.output_dir / f"pie_{len(list(self.output_dir.glob('*.html')))}.html"
+        fig.write_html(str(fp))
+        return str(fp)
+
     def visualize(self, chart_type: str, data: Dict, title: str = None) -> str:
-        """
-        Main visualization function (used by agent).
-        
-        Args:
-            chart_type: Type of chart (line, bar, comparison)
-            data: Chart data
-            title: Chart title
-            
-        Returns:
-            Path to saved chart
-        """
+        """Main visualization dispatcher."""
         title = title or f"{chart_type.title()} Chart"
-        
-        if chart_type == 'line':
-            return self.create_line_chart(data, title)
-        
-        elif chart_type == 'bar':
-            return self.create_bar_chart(data, title)
-        
-        elif chart_type == 'comparison':
-            return self.create_comparison_chart(data, title)
-        
-        else:
-            return f"Error: Unknown chart type: {chart_type}"
+        dispatch = {
+            'line': self.create_line_chart,
+            'bar': self.create_bar_chart,
+            'comparison': self.create_comparison_chart,
+            'radar': self.create_radar_chart,
+            'heatmap': self.create_heatmap_chart,
+            'pie': self.create_pie_chart,
+        }
+        fn = dispatch.get(chart_type)
+        if fn:
+            return fn(data, title)
+        return f"Error: Unknown chart type: {chart_type}"
 
 
 def create_visualizer_tool() -> Tool:

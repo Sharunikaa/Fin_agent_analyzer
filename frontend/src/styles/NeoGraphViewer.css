@@ -1,7 +1,7 @@
 .neo-graph-container {
   display: flex;
   flex-direction: column;
-  border: 1px solid #1E2330;
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
   margin: 16px 0;
@@ -13,7 +13,7 @@
   align-items: center;
   padding: 12px 16px;
   border-bottom: 1px solid;
-  background-color: #111318;
+  background-color: var(--surface-strong);
 }
 
 .neo-graph-title {
@@ -43,7 +43,7 @@
 }
 
 .neo-graph-controls button.active {
-  box-shadow: 0 0 8px rgba(79, 142, 247, 0.4);
+  box-shadow: 0 0 8px var(--accent-soft);
 }
 
 .neo-graph-canvas {
@@ -56,15 +56,15 @@
 .neo-graph-stats {
   padding: 8px 16px;
   border-top: 1px solid;
-  background-color: #0A0C10;
+  background-color: var(--bg);
   font-size: 12px;
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
 }
 
 .neo-graph-details {
   padding: 12px 16px;
   border: 1px solid;
-  background-color: #161A22;
+  background-color: var(--surface-strong);
   margin-top: 8px;
   border-radius: 4px;
   font-size: 12px;
@@ -80,7 +80,7 @@
   justify-content: center;
   position: absolute;
   inset: 0;
-  background-color: rgba(10, 12, 16, 0.8);
+  background-color: color-mix(in srgb, var(--bg) 82%, transparent);
   font-weight: bold;
   z-index: 10;
 }

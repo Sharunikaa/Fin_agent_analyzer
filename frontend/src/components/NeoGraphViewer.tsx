@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import Cytoscape from 'cytoscape';
 import COSELayout from 'cytoscape-cose-bilkent';
+import { useTheme } from '../theme';
 import '../styles/NeoGraphViewer.css';
 
 // Register layout
 Cytoscape.use(COSELayout);
 
-const C = {
+const DARK = {
   bg: '#0A0C10',
   surface: '#111318',
   card: '#161A22',
@@ -20,6 +21,22 @@ const C = {
   text: '#E8EAF0',
   textMid: '#8891A8',
   textDim: '#454E66',
+};
+
+const LIGHT = {
+  bg: '#F3F7FC',
+  surface: '#FFFFFF',
+  card: '#F5F8FC',
+  border: '#D2DCE8',
+  teal: '#1FA37A',
+  blue: '#2F7FE7',
+  amber: '#C68A2D',
+  red: '#D45C5C',
+  green: '#1FA37A',
+  purple: '#557CE6',
+  text: '#102033',
+  textMid: '#506580',
+  textDim: '#7A8BA1',
 };
 
 interface Node {
@@ -49,11 +66,13 @@ interface NeoGraphProps {
 }
 
 export default function NeoGraphViewer({ query, nodes, edges, loading = false }: NeoGraphProps) {
+  const { isDark } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<any>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [layoutName, setLayoutName] = useState<'cose' | 'grid' | 'circle'>('cose');
   const [statsText, setStatsText] = useState('');
+  const C = isDark ? DARK : LIGHT;
 
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return;
@@ -147,10 +166,21 @@ export default function NeoGraphViewer({ query, nodes, edges, loading = false }:
 
     cyRef.current = cy;
 
-    // Auto-fit on load
-    cy.fit();
+    // Auto-fit with padding
+    setTimeout(() => {
+      cy.fit(null, 20);
+    }, 100);
 
-    // Stats
+    // Handle window resize
+    const handleResize = () => {
+      if (cyRef.current) {
+        cyRef.current.fit(null, 20);
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    // Stats - now with actual data
     const numCompanies = nodes.filter(n => n.data.type === 'company').length;
     const numDocuments = nodes.filter(n => n.data.type === 'document').length;
     const numSignals = nodes.filter(n => n.data.type === 'signal').length;
@@ -161,9 +191,10 @@ export default function NeoGraphViewer({ query, nodes, edges, loading = false }:
     );
 
     return () => {
+      window.removeEventListener('resize', handleResize);
       cy.destroy();
     };
-  }, [nodes, edges, layoutName]);
+  }, [nodes, edges, layoutName, C]);
 
   const handleLayoutChange = (newLayout: 'cose' | 'grid' | 'circle') => {
     setLayoutName(newLayout);

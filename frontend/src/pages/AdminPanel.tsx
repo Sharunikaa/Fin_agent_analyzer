@@ -327,7 +327,7 @@ export default function AdminPanel() {
                             <div>
                               <p className="text-base font-semibold text-[var(--text)]">{doc.name || `Document ${index + 1}`}</p>
                               <p className="mt-1 text-sm text-[var(--text-soft)]">
-                                {doc.sections || Math.floor(Math.random() * 50) + 10} sections • {doc.size || '2.4 MB'}
+                                {doc.sections || '—'} sections • {doc.size || '—'}
                               </p>
                             </div>
                             <ActionButton

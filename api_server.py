@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import datetime
 import logging
 from pathlib import Path
 from flask import Flask, request, jsonify
@@ -207,7 +208,6 @@ def _query_duckdb_metrics(companies: list, years: list) -> dict:
     finally:
         conn.close()
     return result
-    return out
 
 
 # ── /api/query ──────────────────────────────────────────────────────────
@@ -247,23 +247,34 @@ def api_query():
         retriever = EnhancedRetrieverTool()
         all_semantic, all_sources, all_numerical = [], [], {}
 
+        # Build targets: use extracted companies/years, or common fallback set for broad retrieval
         targets = []
+        fallback_companies = ["AMD", "ORACLE", "NIKE", "APPLE", "MICROSOFT", "NETFLIX"]
+        fallback_years = [2021, 2022, 2023]
+        
         if companies and years:
             targets = [(c, y) for c in companies for y in years]
         elif companies:
-            targets = [(c, 2021) for c in companies]
+            # Only companies given: try with fallback years
+            targets = [(c, y) for c in companies for y in fallback_years]
         elif years:
-            targets = [("AMD", y) for y in years]
+            # Only years given: try with fallback companies for broader coverage
+            targets = [(c, y) for c in fallback_companies for y in years]
         else:
-            targets = [("AMD", 2021)]
+            # No extraction: use fallback set for reasonable broad retrieval
+            targets = [(c, y) for c in fallback_companies[:3] for y in fallback_years[:2]]
 
         for co, yr in targets:
-            r = retriever.retrieve(query, co, yr)
-            if r["success"]:
-                all_semantic.extend(r["semantic_data"])
-                all_sources.extend(r["sources"])
-                if r["numerical_data"]:
-                    all_numerical[f"{co}_{yr}"] = r["numerical_data"]
+            try:
+                r = retriever.retrieve(query, co, yr)
+                if r["success"]:
+                    all_semantic.extend(r["semantic_data"])
+                    all_sources.extend(r["sources"])
+                    if r["numerical_data"]:
+                        all_numerical[f"{co}_{yr}"] = r["numerical_data"]
+            except Exception as e:
+                logger.debug(f"Retriever failed for {co} {yr}: {e}")
+                continue
         agents_called.append("retriever")
 
         # ── Step 3: Analyst (if planner says so) ──
@@ -448,6 +459,7 @@ def api_query():
             log_file = EVALS_DIR / "logs" / f"feedback_log_{time.strftime('%Y%m%d')}.jsonl"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             skip_log = False
+            cutoff_time = datetime.datetime.now() - datetime.timedelta(minutes=5)
             if log_file.exists():
                 with open(log_file, "rb") as f:
                     # Read last 4KB to check recent entries
@@ -459,9 +471,11 @@ def api_query():
                     try:
                         prev = json.loads(line)
                         if prev.get("query") == query:
-                            skip_log = True
-                            break
-                    except json.JSONDecodeError:
+                            prev_time = datetime.datetime.fromisoformat(prev.get("timestamp", ""))
+                            if prev_time >= cutoff_time:
+                                skip_log = True
+                                break
+                    except (json.JSONDecodeError, ValueError):
                         continue
 
             if not skip_log:
@@ -506,7 +520,7 @@ def api_query():
             "agents_called": agents_called,
             "planner_reasoning": plan.get("reasoning", ""),
             "stats": {
-                "neo4j_documents": len(targets),
+                "neo4j_documents": len(set(companies)) * len(set(years)) if companies and years else len(set(companies) or set(years) or {"AMD"}),
                 "unique_companies": len(set(companies)),
                 "unique_years": len(set(years)),
                 "chromadb_chunks": len(all_semantic),

@@ -267,7 +267,7 @@ export default function QueryDashboard() {
         try {
           const companies = data.companies || [];
           for (const company of companies.slice(0, 2)) {
-            const graphRes = await fetch('http://localhost:5001/api/neo4j-graph', {
+            const graphRes = await fetch('/api/neo4j-graph', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ company, limit: 30 }),

@@ -58,12 +58,18 @@ def main():
         except:
             cols[name] = client.create_collection(name=name)
 
-    # Gather already-indexed IDs
+    # Gather already-indexed IDs using pagination to avoid memory overload
     existing_ids = set()
     for name, col in cols.items():
         cnt = col.count()
         if cnt:
-            existing_ids.update(col.get(limit=cnt)["ids"])
+            # Page through results to avoid fetching all IDs at once
+            offset = 0
+            page_size = 5000
+            while offset < cnt:
+                batch = col.get(offset=offset, limit=page_size)
+                existing_ids.update(batch["ids"])
+                offset += page_size
     print(f"📊 Already indexed: {len(existing_ids)} chunks\n")
 
     files = sorted(CHUNKS_DIR.rglob("*_chunks.json"))

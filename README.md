@@ -94,7 +94,7 @@ The system is built for accuracy and citation: every answer cites the source doc
 
 **Five-phase product view** (batch ingestion → multi-signal extraction → hybrid storage → agents → UI):
 
-![End-to-end architecture: ingestion through dashboards](docs/assets/architecture-diagram.png)
+![End-to-end architecture: ingestion through dashboards](docs/asset/architecture-diagram.png)
 
 Design goal: answers cite **source filing + section/page** where metadata allows.
 
@@ -102,29 +102,122 @@ Design goal: answers cite **source filing + section/page** where metadata allows
 
 ## Product UI screenshots
 
-### Ingestion pipeline (vectorize → ChromaDB → Neo4j → DuckDB)
+### Admin Dashboard — Document Ingestion & Quality Control
 
-![Processing steps: BAAI/bge embeddings, ChromaDB, Neo4j indexing, DuckDB signals](docs/assets/ui-processing-pipeline.png)
+**Operational controls for ingestion and document quality** — upload new filings, inspect parsed outputs, and keep the underlying knowledge pipeline in a healthier state.
 
-### Financial RAG assistant (Neo4j + ChromaDB + DuckDB)
+![Admin dashboard with document inventory and processing status](docs/asset/ui-admin-dashboard.png)
 
-![Assistant landing with suggested prompts](docs/assets/ui-assistant-home.png)
+- **Document Inventory:** Track uploaded documents and their processing status
+- **Parsed Sections:** View indexed and structured sections in the knowledge base
+- **Learning Models:** Monitor active extraction and synthesis units
+- **Processing Flow:** Step-by-step ingestion pipeline (upload → parse → apply learning → refresh statistics)
 
-![Answer with expandable sources and retrieval stats](docs/assets/ui-rag-answer-sources.png)
+![PDF upload and parsing progress](docs/asset/ui-admin-upload.png)
 
-![Heatmap, gauge, and cited sources](docs/assets/ui-rag-charts.png)
+### Financial RAG Assistant — Query & Analysis Interface
 
-### Knowledge base analytics
+**Ask one focused question at a time** — the assistant answers, shows evidence footprints, and exposes the pipeline used for that specific prompt.
 
-![Company filter and per-document analysis](docs/assets/ui-knowledge-analytics.png)
+![Assistant landing with suggested prompts and query examples](docs/asset/ui-assistant-home.png)
 
-### Admin — upload & parse
+- Suggested prompts for common financial queries
+- Natural language question input with analysis visualization option
 
-![PDF upload and parsing progress](docs/assets/ui-admin-upload.png)
+#### Assistant Response with Evidence & Retrieval Metrics
 
-### Evaluation dashboard (layered RAG metrics)
+![Assistant response with detailed comparison analysis](docs/asset/ui-assistant-response.png)
 
-![Retrieval, context, generation metrics and per-query breakdown](docs/assets/ui-eval-dashboard.png)
+- Full-text answer with citations and evidence from source documents
+- Detailed context for each claim (source, section, relevance)
+- Retrieval metrics showing evidence quality and retrieval chain
+
+#### Rich Visualizations & Signal Analysis
+
+![Signal Profile Comparison — ORACLE vs NIKE radar chart](docs/asset/ui-signal-profile-comparison.png)
+
+![Signal Heatmap showing company-level signal metrics](docs/asset/ui-signal-heatmap.png)
+
+- **Radar charts:** Compare signal profiles across companies on risk, commitment, and other dimensions
+- **Heatmaps:** Visualize signal intensity by company and category
+- **Interactive exploration:** Click to drill down into source documents
+
+#### Sources & Evidence Footprint
+
+![Sources section with cited documents and retrieval details](docs/asset/ui-sources-cited.png)
+
+- List of all documents accessed during retrieval
+- Document metadata (company, year, document type)
+- Retrieval confidence and relevance indicators
+
+### Knowledge Base Analytics — Portfolio & Coverage
+
+**Portfolio analytics with better structure** — review company coverage, filing trends, and extracted segment details in a cleaner operational view.
+
+![Company portfolio overview with filing history and analysis](docs/asset/ui-knowledge-base-portfolio.png)
+
+- **By Company:** Browse all companies in the knowledge base with document counts and year ranges
+- **By Year:** Analyze filings by reporting period
+- **Document Analysis:** Per-document summaries with extracted metrics and anomalies
+
+### Evaluation Dashboard — RAG Quality Metrics
+
+**Quality metrics in a more readable operational format** — track retrieval, context construction, and generation quality with clearer thresholds and per-query diagnostics.
+
+![RAG evaluation dashboard with overall scores and layer metrics](docs/asset/ui-eval-dashboard-full.png)
+
+#### Overall Performance Metrics
+
+- **Overall Score:** Blended performance across the entire RAG pipeline
+- **Total Evals:** Number of evaluation queries run
+- **Ideal Diagnoses:** Queries that met desired outcome patterns
+- **Hallucinations:** Cases flagged as unsupported generation
+
+#### Layered Quality View
+
+![Layer-by-layer retrieval, context, and generation metrics](docs/asset/ui-eval-layers.png)
+
+- **Layer 1 — Retrieval:** Recall, precision, relevance metrics with target thresholds
+- **Layer 2 — Context:** Context construction quality and relevance evaluation
+- **Layer 3 — Generation:** Faithfulness, answer relevance, correctness, semantic similarity
+
+#### Diagnosis Distribution & Performance by Category
+
+![Diagnosis distribution showing ideal vs mixed outcomes](docs/asset/ui-eval-diagnosis.png)
+
+- **Ideal:** Successful queries meeting all quality criteria
+- **Mixed:** Partially successful queries with noted issues
+- **Performance by category:** Segment scores by query type or domain
+
+#### Per-Query Breakdown
+
+![Detailed per-query metrics table with latency and diagnosis](docs/asset/ui-eval-per-query.png)
+
+- Individual query performance with faith, relevancy, correctness scores
+- Retrieval confidence and context recall metrics
+- Diagnosis classification and execution latency
+- Low-level scores for failure mode analysis
+
+### Auto-Tuner — Live Parameter Optimization
+
+**Live parameter tuning based on diagnostic patterns** — automatically adjust retrieval and generation parameters to optimize performance.
+
+![Auto-tuner panel with context window, similarity thresholds, and top-k parameters](docs/asset/ui-auto-tuner.png)
+
+- **Context Window:** Adjustable context chunk size (default: 2)
+- **Max Context Length:** Token limit for context (default: 4000)
+- **Min Similarity:** Semantic similarity threshold (default: 0.5)
+- **Top-K:** Number of results to retrieve (default: 10)
+- **Rerank Top-K:** Re-ranking parameters for result refinement
+
+#### Tuning History
+
+![Tuning history showing recent auto-adjustments and their impacts](docs/asset/ui-tuning-history.png)
+
+- Timestamp of last tuning action
+- Parameter changes applied
+- Impact on hallucination rate and retrieval quality
+- Historical parameter trends
 
 ---
 
@@ -610,7 +703,7 @@ python knowledge_base/test_query.py --company AMD
 ├── data/
 │   ├── duckdb/
 │   └── chromadb/
-├── docs/assets/            # Architecture diagrams
+├── docs/asset/             # Architecture diagrams
 ├── api_server.py           # Main Flask API (:5001)
 ```
 

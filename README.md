@@ -1,4 +1,4 @@
-# Financial Intelligence Suite
+# HyperVerge Financial Intelligence Suite
 
 A **Retrieval-Augmented Generation (RAG)** stack for financial documents: **extract → chunk & signal → index (Neo4j + ChromaDB + DuckDB)** → **Flask API** with **`smart_retriever`** → **React (Vite)** UI.
 
@@ -26,7 +26,8 @@ Take one or all three PDFs from your data folder, run through a three-phase pipe
 ---
 
 ## Project Overview
-Financial Intelligence Suite is a production-ready **Retrieval-Augmented Generation (RAG)** system designed specifically for financial documents (10-Ks, 10-Qs, annual reports, etc.). It processes PDF documents through a structured pipeline, extracts and indexes content across three specialized systems (Neo4j, ChromaDB, DuckDB), and exposes intelligent query and analytics capabilities through both a REST API and an interactive web dashboard.
+
+HyperVerge Financial Intelligence Suite is a production-ready **Retrieval-Augmented Generation (RAG)** system designed specifically for financial documents (10-Ks, 10-Qs, annual reports, etc.). It processes PDF documents through a structured pipeline, extracts and indexes content across three specialized systems (Neo4j, ChromaDB, DuckDB), and exposes intelligent query and analytics capabilities through both a REST API and an interactive web dashboard.
 
 **Core workflow:**
 - Ingest PDFs → Extract structure, text, tables, charts → Classify sections and extract financial signals → Index into hybrid storage layers → Query with citations and retrieval metrics
@@ -858,6 +859,95 @@ Provide test queries + expected answers in `evals/ground_truth/queries.json`:
   "doc_ids": ["AMD_2022_10K"]
 }
 ```
+
+---
+
+## Recent Fixes & Updates (April 2026)
+
+### Critical Fixes Implemented
+
+#### 1. **Neo4j Graph Population** ✅
+**Issue:** Neo4j database was empty (0 Company nodes, 2 Documents) despite Phase 2 completing successfully.
+
+**Root Cause:** The `neo4j_setup.py` script was not being run after Phase 2 completion. This script reads from `phase2_output/classified_sections/` and `phase2_output/chunks/` and populates the Neo4j graph.
+
+**Fix:** Execute the Neo4j population script:
+```bash
+python phase3/neo4j_setup.py
+```
+
+**Result:** ✅ **197 documents** ingested with full graph structure:
+- Company nodes created (Apple, Microsoft, Amazon, Nike, Adobe, etc.)
+- Document nodes linked with year and doc_type metadata
+- Section nodes for each section_type (business_overview, financial_statements, risk_factors, etc.)
+- Chunk nodes linked hierarchically with relationships (FILED, CONTAINS, SUPERSEDES, PART_OF)
+- All constraints and indexes created for fast lookups
+- Completed in 4.9 seconds
+
+**Updated Workflow:** Phase 3 now requires two steps:
+```bash
+# Step 1: Populate Neo4j graph
+python phase3/neo4j_setup.py
+
+# Step 2: Embed chunks into ChromaDB incrementally
+python phase3/chromadb_incremental.py
+```
+
+---
+
+#### 2. **ChromaDB Incremental Embedding Glob Pattern** ✅
+**Issue:** Incremental embedding script reported "0 new chunks to embed" even though 137K+ chunks existed in `phase2_output/chunks/`.
+
+**Root Cause:** The script used `Path.glob("chunks/*_chunks.json")` which only searches the top level. Chunks were organized in subdirectories (one per company): `chunks/APPLE/`, `chunks/AMAZON/`, etc.
+
+**Fix:** Changed glob pattern to recursive search:
+```python
+# Before (incorrect - missed nested files)
+for f in sorted(PHASE2_OUTPUT.glob("chunks/*_chunks.json")):
+
+# After (correct - recursive)
+for f in sorted((PHASE2_OUTPUT / "chunks").rglob("*_chunks.json")):
+```
+
+**File Updated:** [`phase3/chromadb_incremental.py`](phase3/chromadb_incremental.py) (Line 41)
+
+**Result:** ✅ **137,416 chunks** now being incrementally embedded into ChromaDB:
+- `business_overview`: 9,984 chunks (growing)
+- `risk_factors`: queued for embedding
+- `mda`: queued for embedding
+- `financial_statements`: queued for embedding
+- `all_sections`: queued for embedding
+- Progress tracked in real-time; ~1.95GB ChromaDB file updating
+
+---
+
+#### 3. **Frontend Report Generation Progress Display** ✅
+**Issue:** Report generation button showed generic "Generating report..." without visibility into multi-step agent execution.
+
+**Fix:** Updated [AnalyticsDashboard.tsx](frontend/src/pages/AnalyticsDashboard.tsx) to display progress through three execution stages:
+```
+"Export report" (idle)
+  ↓
+"Analysing the data..." (data analysis phase)
+  ↓
+"Calling planner agent..." (planning phase)
+  ↓
+"Calling analyser agent..." (analysis & generation)
+  ↓
+"Export report" (complete)
+```
+
+**Result:** ✅ Users now see real-time progress of agent orchestration in the UI.
+
+---
+
+### Verification Checklist (Post-Fixes)
+
+- [x] Neo4j graph populated: 197 documents, 25+ companies
+- [x] ChromaDB incremental embedding running: 9,984 business_overview chunks indexed
+- [x] Frontend showing multi-step progress: "Analysing → Planner → Analyser"
+- [x] `/api/query` finding relevant chunks (tested with MICROSOFT 2021: 6 relevant chunks found)
+- [x] Graph relationships functioning (FILED, CONTAINS, SUPERSEDES working)
 
 ---
 

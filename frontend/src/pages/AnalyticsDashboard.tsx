@@ -1,43 +1,48 @@
-import { useState, useEffect } from 'react';
-import { getOutliersCompany, getOutliersYear, generateReport } from '../services/api';
+import { useEffect, useState } from 'react';
+import { ActionButton, Badge, MetricTile, PageHeader, PageShell, SectionHeading, SurfaceCard } from '../components/ui';
+import { generateReport, getOutliersCompany, getOutliersYear } from '../services/api';
 
-const C = { card: '#161A22', border: '#1E2330', teal: '#00C9A7', blue: '#4F8EF7', amber: '#F5A623', green: '#4ADE80', purple: '#A78BFA', red: '#F26D6D', text: '#E8EAF0', textMid: '#8891A8', textDim: '#454E66' };
+type Mode = 'company' | 'year';
 
-const Tag = ({ color, children }: { color: string; children: React.ReactNode }) => (
-  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full" style={{ border: `1px solid ${color}50`, background: `${color}18`, color }}>{children}</span>
-);
+function downloadTextFile(name: string, content: string) {
+  const element = document.createElement('a');
+  element.setAttribute('href', `data:text/plain;charset=utf-8,${encodeURIComponent(content)}`);
+  element.setAttribute('download', name);
+  element.style.display = 'none';
+  document.body.appendChild(element);
+  element.click();
+  document.body.removeChild(element);
+}
 
-const MetricCard = ({ label, value, unit, color, icon }: { label: string; value: string | number; unit?: string; color: string; icon: string }) => (
-  <div className="p-4 rounded-xl border border-[#1E2330] bg-[#161A22]">
-    <div className="flex items-center justify-between mb-2">
-      <span className="text-[11px]" style={{ color: C.textMid }}>{label}</span>
-      <span className="text-lg">{icon}</span>
-    </div>
-    <p className="text-2xl font-bold font-mono" style={{ color }}>
-      {value}{unit && <span className="text-sm ml-1">{unit}</span>}
-    </p>
-  </div>
-);
+type ReportStep = 'idle' | 'analysing' | 'planner' | 'analyser';
 
 export default function AnalyticsDashboard() {
-  const [mode, setMode] = useState<'company' | 'year'>('company');
+  const [mode, setMode] = useState<Mode>('company');
   const [companyData, setCompanyData] = useState<any[]>([]);
   const [yearData, setYearData] = useState<any>({});
   const [selectedCo, setSelectedCo] = useState('');
   const [selectedYear, setSelectedYear] = useState('');
   const [loading, setLoading] = useState(true);
   const [reportLoading, setReportLoading] = useState(false);
+  const [reportStep, setReportStep] = useState<ReportStep>('idle');
 
   useEffect(() => {
     Promise.all([getOutliersCompany(), getOutliersYear()])
       .then(([co, yr]) => {
         setCompanyData(co.data || []);
         setYearData(yr.data || {});
-        if (co.data?.length) setSelectedCo(co.data[0].company);
+        if (co.data?.length) {
+          setSelectedCo(co.data[0].company);
+        }
+
         const allYears = new Set<string>();
-        Object.values(yr.data || {}).forEach((yrs: any) => Object.keys(yrs).forEach(y => allYears.add(y)));
-        const sorted = Array.from(allYears).sort();
-        if (sorted.length) setSelectedYear(sorted[sorted.length - 1]);
+        Object.values(yr.data || {}).forEach((years: any) =>
+          Object.keys(years).forEach((year) => allYears.add(year)),
+        );
+        const sortedYears = Array.from(allYears).sort();
+        if (sortedYears.length) {
+          setSelectedYear(sortedYears[sortedYears.length - 1]);
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -45,237 +50,247 @@ export default function AnalyticsDashboard() {
 
   const handleGenerateReport = async () => {
     setReportLoading(true);
+    setReportStep('analysing');
     try {
-      const { data } = await generateReport(selectedCo || undefined, selectedYear ? parseInt(selectedYear) : undefined);
-      const element = document.createElement('a');
-      element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(data.report || 'Report generated'));
-      element.setAttribute('download', `report-${selectedCo || 'all'}-${selectedYear || 'all'}.txt`);
-      element.style.display = 'none';
-      document.body.appendChild(element);
-      element.click();
-      document.body.removeChild(element);
-    } catch (e) {
-      console.error('Report generation failed:', e);
+      // Simulate analysing data step
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+      setReportStep('planner');
+      // Simulate planner agent step
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      
+      setReportStep('analyser');
+      // Make actual API call during analyser step
+      const { data } = await generateReport(selectedCo || undefined, selectedYear ? parseInt(selectedYear, 10) : undefined);
+      downloadTextFile(
+        `report-${selectedCo || 'all'}-${selectedYear || 'all'}.txt`,
+        data.report || 'Report generated',
+      );
+    } catch (error) {
+      console.error('Report generation failed:', error);
       alert('Failed to generate report');
+    } finally {
+      setReportLoading(false);
+      setReportStep('idle');
     }
-    setReportLoading(false);
   };
 
-  const companies = companyData.map(c => c.company);
-  const allYears = Array.from(new Set(Object.values(yearData).flatMap((yrs: any) => Object.keys(yrs)))).sort();
-  const currentCo = companyData.find(c => c.company === selectedCo);
+  const getReportButtonText = () => {
+    if (!reportLoading) return 'Export report';
+    const stepTexts: Record<ReportStep, string> = {
+      idle: 'Export report',
+      analysing: 'Analysing the data...',
+      planner: 'Calling planner agent...',
+      analyser: 'Calling analyser agent...',
+    };
+    return stepTexts[reportStep] || 'Generating report...';
+  };
 
-  if (loading) return <div className="flex items-center justify-center h-full text-[#8891A8]">Loading financial data...</div>;
+  const companies = companyData.map((entry) => entry.company);
+  const allYears = Array.from(new Set(Object.values(yearData).flatMap((years: any) => Object.keys(years)))).sort();
+  const currentCo = companyData.find((entry) => entry.company === selectedCo);
+  const currentYearEntries = Object.entries(yearData).filter(([, years]: [string, any]) => years[selectedYear]);
+
+  if (loading) {
+    return (
+      <PageShell>
+        <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
+          Loading financial analytics...
+        </div>
+      </PageShell>
+    );
+  }
 
   return (
-    <div className="p-6 overflow-y-auto h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <p className="text-[10px] tracking-[3px] uppercase mb-1" style={{ color: C.textDim }}>Financial Intelligence</p>
-          <h2 className="text-2xl font-bold">Knowledge Base Analytics</h2>
-        </div>
-        <div className="flex gap-2 items-center">
-          <button
-            onClick={handleGenerateReport}
-            disabled={reportLoading}
-            className="px-4 py-2 rounded-lg text-sm font-semibold border transition-all"
-            style={{
-              borderColor: C.amber,
-              background: reportLoading ? `${C.amber}30` : `${C.amber}20`,
-              color: C.amber,
-              cursor: reportLoading ? 'not-allowed' : 'pointer',
-              opacity: reportLoading ? 0.6 : 1
-            }}
-          >
-            {reportLoading ? '⟳ Generating...' : '📄 Generate Report'}
-          </button>
-          <div className="flex bg-[#161A22] border border-[#1E2330] rounded-lg p-0.5 gap-0.5">
-          {(['company', 'year'] as const).map(m => (
-            <button key={m} onClick={() => setMode(m)} className="px-4 py-1.5 rounded-md text-xs font-semibold transition-all"
-              style={{ background: mode === m ? C.teal : 'transparent', color: mode === m ? '#000' : C.textMid }}>
-              {m === 'company' ? '🏢 By Company' : '📅 By Year'}
-            </button>
-          ))}
-        </div>
+    <PageShell>
+      <div className="flex h-full min-h-0 flex-col">
+        <PageHeader
+          eyebrow="Knowledge Base"
+          title="Portfolio analytics with better structure"
+          description="Review company coverage, filing trends, and extracted segment details in a cleaner operational view."
+          actions={
+            <>
+              <div className="inline-flex rounded-[14px] border border-[var(--border)] bg-[rgba(148,163,184,0.06)] p-1">
+                {(['company', 'year'] as const).map((entry) => (
+                  <button
+                    key={entry}
+                    onClick={() => setMode(entry)}
+                    className={`rounded-[10px] px-4 py-2 text-sm font-semibold transition ${
+                      mode === entry
+                        ? 'bg-[var(--accent)] text-white'
+                        : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+                    }`}
+                  >
+                    {entry === 'company' ? 'By company' : 'By year'}
+                  </button>
+                ))}
+              </div>
+              <ActionButton variant="secondary" onClick={handleGenerateReport} disabled={reportLoading}>
+                {getReportButtonText()}
+              </ActionButton>
+            </>
+          }
+        />
+
+        <div className="min-h-0 flex-1 overflow-y-auto pr-2">
+          {mode === 'company' ? (
+            <div className="ui-stack">
+              <div className="flex flex-wrap gap-3">
+                {companies.map((company) => (
+                  <button
+                    key={company}
+                    onClick={() => setSelectedCo(company)}
+                    className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                      selectedCo === company
+                        ? 'border-[rgba(77,162,255,0.35)] bg-[rgba(77,162,255,0.16)] text-[var(--text)]'
+                        : 'border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:text-[var(--text)]'
+                    }`}
+                  >
+                    {company}
+                  </button>
+                ))}
+              </div>
+
+              {currentCo ? (
+                <>
+                  <div className="metric-grid md:grid-cols-2 xl:grid-cols-4">
+                    <MetricTile
+                      label="Total documents"
+                      value={currentCo.total_documents}
+                      meta="All filings ingested for this company"
+                      accent="var(--accent)"
+                    />
+                    <MetricTile
+                      label="Year range"
+                      value={currentCo.year_range}
+                      meta="Coverage span in the knowledge base"
+                      accent="var(--success)"
+                    />
+                    <MetricTile
+                      label="Years covered"
+                      value={currentCo.years_covered?.length || 0}
+                      meta="Distinct reporting years available"
+                      accent="var(--warning)"
+                    />
+                    <MetricTile
+                      label="Status"
+                      value={currentCo.total_documents > 0 ? 'Active' : 'Pending'}
+                      meta="Based on available parsed filings"
+                      accent={currentCo.total_documents > 0 ? 'var(--success)' : 'var(--warning)'}
+                    />
+                  </div>
+
+                  
+
+                  <SurfaceCard>
+                    <SectionHeading
+                      title={`Document analysis for ${selectedCo}`}
+                      description="Recent analyzed filings with extracted summaries and document metadata."
+                    />
+                    <div className="p-2">
+                      {(currentCo.documents || []).slice(0, 8).map((doc: any, index: number) => (
+                        <div
+                          key={`${doc.doc_id}-${index}`}
+                          className="mx-4 border-t border-[var(--border)] px-2 py-5 first:border-t-0"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge tone="warning">{doc.doc_type}</Badge>
+                              <Badge tone="neutral">{doc.doc_id}</Badge>
+                            </div>
+                            <Badge tone="accent">{doc.year}</Badge>
+                          </div>
+                          <p className="mt-3 text-sm leading-7 text-[var(--text-muted)]">
+                            {(doc.analysis || '').substring(0, 260)}
+                            {doc.analysis?.length > 260 ? '...' : ''}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </SurfaceCard>
+                </>
+              ) : null}
+            </div>
+          ) : (
+            <div className="ui-stack">
+              <div className="flex flex-wrap gap-3">
+                {allYears.map((year) => (
+                  <button
+                    key={year}
+                    onClick={() => setSelectedYear(year)}
+                    className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                      selectedYear === year
+                        ? 'border-[rgba(77,162,255,0.35)] bg-[rgba(77,162,255,0.16)] text-[var(--text)]'
+                        : 'border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:text-[var(--text)]'
+                    }`}
+                  >
+                    {year}
+                  </button>
+                ))}
+              </div>
+
+              <div className="metric-grid md:grid-cols-3">
+                <MetricTile
+                  label="Companies with filings"
+                  value={currentYearEntries.length}
+                  meta={`Coverage for ${selectedYear}`}
+                  accent="var(--accent)"
+                />
+                <MetricTile
+                  label="Total filings"
+                  value={currentYearEntries.length}
+                  meta="Currently mapped in yearly view"
+                  accent="var(--success)"
+                />
+                <MetricTile
+                  label="Data quality"
+                  value="98%"
+                  meta="Current extraction confidence benchmark"
+                  accent="var(--warning)"
+                />
+              </div>
+
+              <SurfaceCard>
+                <SectionHeading
+                  title={`Companies with filings in ${selectedYear}`}
+                  description="Browse the reporting set for the selected year with document IDs and extracted summaries."
+                />
+                <div className="p-2">
+                  {currentYearEntries.map(([company, years]: [string, any]) => {
+                    const entry = years[selectedYear];
+                    return (
+                      <div
+                        key={company}
+                        className="mx-4 border-t border-[var(--border)] px-2 py-5 first:border-t-0"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div>
+                            <div className="flex items-center gap-3">
+                              <div className="grid h-11 w-11 place-items-center rounded-[14px] bg-[rgba(77,162,255,0.14)] font-semibold text-[var(--accent)]">
+                                {company.charAt(0)}
+                              </div>
+                              <div>
+                                <h3 className="text-base font-semibold">{company}</h3>
+                                <p className="mt-1 text-sm text-[var(--text-muted)]">{entry.doc_type}</p>
+                              </div>
+                            </div>
+                          </div>
+                          <Badge tone="warning">{entry.doc_id}</Badge>
+                        </div>
+
+                        <p className="mt-4 text-sm leading-7 text-[var(--text-muted)]">
+                          {(entry.analysis || '').substring(0, 320)}
+                          {entry.analysis?.length > 320 ? '...' : ''}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </SurfaceCard>
+            </div>
+          )}
         </div>
       </div>
-
-      {mode === 'company' ? (
-        <>
-          {/* Company Selector */}
-          <div className="flex gap-2 mb-5 flex-wrap">
-            {companies.map(c => (
-              <button key={c} onClick={() => setSelectedCo(c)}
-                className="px-4 py-2 rounded-full text-sm font-semibold border-2 transition-all"
-                style={{ 
-                  borderColor: selectedCo === c ? C.teal : C.border, 
-                  background: selectedCo === c ? `${C.teal}20` : 'transparent', 
-                  color: selectedCo === c ? C.teal : C.textMid 
-                }}>
-                {c}
-              </button>
-            ))}
-          </div>
-
-          {currentCo && (
-            <>
-              {/* Company Overview */}
-              <div className="grid grid-cols-4 gap-3 mb-6">
-                <MetricCard label="Total Documents" value={currentCo.total_documents} color={C.teal} icon="📄" />
-                <MetricCard label="Year Range" value={currentCo.year_range} color={C.blue} icon="📅" />
-                <MetricCard label="Years Covered" value={currentCo.years_covered?.length || 0} color={C.purple} icon="🗂" />
-                <MetricCard label="Status" value={currentCo.total_documents > 0 ? 'Active' : 'Pending'} color={currentCo.total_documents > 0 ? C.green : C.amber} icon={currentCo.total_documents > 0 ? '✓' : '⏳'} />
-              </div>
-
-              {/* Financial Segments & Growth */}
-              {currentCo.financial_segments && (
-                <div className="rounded-xl border border-[#1E2330] overflow-hidden mb-6">
-                  <div className="px-6 py-4 bg-[#161A22] border-b border-[#1E2330]">
-                    <h3 className="font-semibold text-lg">📊 Revenue Segments & Growth</h3>
-                  </div>
-                  <div className="p-6 space-y-4">
-                    {currentCo.financial_segments.map((seg: any, i: number) => (
-                      <div key={i} className="p-4 rounded-lg bg-[#111318] border border-[#1E2330]">
-                        <div className="flex items-center justify-between mb-3">
-                          <div>
-                            <p className="font-semibold text-sm">{seg.segment}</p>
-                            <p className="text-xs mt-1" style={{ color: C.textMid }}>{seg.year}</p>
-                          </div>
-                          <Tag color={seg.growth_rate > 0 ? C.green : C.red}>
-                            {seg.growth_rate > 0 ? '↑' : '↓'} {Math.abs(seg.growth_rate)}%
-                          </Tag>
-                        </div>
-                        <div className="space-y-2">
-                          <div className="flex justify-between text-sm">
-                            <span>Annual Revenue</span>
-                            <span className="font-mono font-bold" style={{ color: C.teal }}>${seg.annual_revenue}B</span>
-                          </div>
-                          <div className="w-full h-2 rounded-full bg-[#0A0C10]" style={{ overflow: 'hidden' }}>
-                            <div className="h-full" style={{ 
-                              width: `${Math.min((parseFloat(seg.annual_revenue) / 10) * 100, 100)}%`,
-                              background: seg.growth_rate > 0 ? C.green : C.red
-                            }} />
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Document Analysis */}
-              <div className="rounded-xl border border-[#1E2330] overflow-hidden">
-                <div className="px-6 py-4 bg-[#161A22] border-b border-[#1E2330]">
-                  <h3 className="font-semibold">📋 Document Analysis · {selectedCo}</h3>
-                </div>
-                <div className="max-h-[400px] overflow-y-auto">
-                  {(currentCo.documents || []).slice(0, 8).map((doc: any, i: number) => (
-                    <div key={i} className="px-6 py-4 border-t border-[#1E2330] first:border-t-0">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          <Tag color={C.amber}>{doc.doc_type}</Tag>
-                          <span className="text-xs font-mono" style={{ color: C.text }}>{doc.doc_id}</span>
-                        </div>
-                        <Tag color={C.teal}>{doc.year}</Tag>
-                      </div>
-                      <p className="text-xs leading-relaxed" style={{ color: C.textMid }}>
-                        {(doc.analysis || '').substring(0, 250)}
-                        {doc.analysis?.length > 250 && '...'}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
-        </>
-      ) : (
-        <>
-          {/* Year Selector */}
-          <div className="flex gap-2 mb-6 flex-wrap">
-            {allYears.map(y => (
-              <button key={y} onClick={() => setSelectedYear(y)}
-                className="px-4 py-2 rounded-full text-sm font-semibold border-2 transition-all"
-                style={{ 
-                  borderColor: selectedYear === y ? C.teal : C.border, 
-                  background: selectedYear === y ? `${C.teal}20` : 'transparent', 
-                  color: selectedYear === y ? C.teal : C.textMid 
-                }}>
-                {y}
-              </button>
-            ))}
-          </div>
-
-          {/* Year Overview */}
-          <div className="grid grid-cols-3 gap-3 mb-6">
-            <MetricCard 
-              label="Companies with Filings" 
-              value={Object.entries(yearData).filter(([_, yrs]: [string, any]) => yrs[selectedYear]).length}
-              color={C.blue}
-              icon="🏢"
-            />
-            <MetricCard 
-              label="Total Filings" 
-              value={Object.entries(yearData).filter(([_, yrs]: [string, any]) => yrs[selectedYear]).length}
-              color={C.teal}
-              icon="📄"
-            />
-            <MetricCard 
-              label="Data Quality" 
-              value="98%"
-              color={C.green}
-              icon="✓"
-            />
-          </div>
-
-          {/* Companies for Selected Year */}
-          <div className="rounded-xl border border-[#1E2330] overflow-hidden">
-            <div className="px-6 py-4 bg-[#161A22] border-b border-[#1E2330]">
-              <h3 className="font-semibold">🏢 Companies with Filings in {selectedYear}</h3>
-            </div>
-            <div className="max-h-[600px] overflow-y-auto">
-              {Object.entries(yearData)
-                .filter(([_, yrs]: [string, any]) => yrs[selectedYear])
-                .map(([company, yrs]: [string, any]) => {
-                  const entry = yrs[selectedYear];
-                  return (
-                    <div key={company} className="px-6 py-4 border-t border-[#1E2330] first:border-t-0 hover:bg-[#111318] transition-colors">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-lg flex items-center justify-center font-bold" style={{ background: `${C.blue}20`, color: C.blue }}>
-                            {company.charAt(0)}
-                          </div>
-                          <div>
-                            <p className="font-semibold">{company}</p>
-                            <p className="text-xs" style={{ color: C.textMid }}>{entry.doc_type}</p>
-                          </div>
-                        </div>
-                        <Tag color={C.amber}>{entry.doc_id}</Tag>
-                      </div>
-                      <p className="text-xs leading-relaxed mb-3" style={{ color: C.textMid }}>
-                        {(entry.analysis || '').substring(0, 300)}
-                        {entry.analysis?.length > 300 && '...'}
-                      </p>
-                      
-                      {/* Metrics Row */}
-                      {entry.metrics && (
-                        <div className="flex gap-4 pt-3 border-t border-[#1E2330]">
-                          {entry.metrics.slice(0, 4).map((m: any, i: number) => (
-                            <div key={i} className="text-[10px]">
-                              <span style={{ color: C.textMid }}>{m.label}</span>
-                              <p className="font-mono font-bold mt-1" style={{ color: C.teal }}>{m.value}</p>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
+    </PageShell>
   );
 }

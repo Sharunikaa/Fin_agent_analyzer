@@ -1,28 +1,88 @@
+import { BarChart3, Bot, FolderCog, LineChart, Moon, Sparkles, SunMedium } from 'lucide-react';
 import { Outlet, NavLink } from 'react-router-dom';
+import { useTheme } from '../theme';
 
 const NAV = [
-  { to: '/query', label: 'RAG Chat', icon: '✦' },
-  { to: '/evaluation', label: 'Eval Metrics', icon: '◈' },
-  { to: '/analytics', label: 'Knowledge Base', icon: '⊙' },
-  { to: '/admin', label: 'Admin', icon: '⚙' },
+  {
+    to: '/query',
+    label: 'Assistant',
+    description: 'Ask, inspect, and trace answers',
+    icon: Bot,
+  },
+  {
+    to: '/evaluation',
+    label: 'Evaluation',
+    description: 'Monitor retrieval and response quality',
+    icon: LineChart,
+  },
+  {
+    to: '/analytics',
+    label: 'Analytics',
+    description: 'Review filings, trends, and coverage',
+    icon: BarChart3,
+  },
+  {
+    to: '/admin',
+    label: 'Admin',
+    description: 'Upload documents and manage pipeline health',
+    icon: FolderCog,
+  },
 ];
 
 export default function Layout() {
+  const { isDark, toggleTheme } = useTheme();
+
   return (
-    <div className="flex h-screen bg-[#0A0C10] text-[#E8EAF0] font-sans overflow-hidden">
-      <div className="w-[58px] flex flex-col items-center pt-4 gap-1 border-r border-[#1E2330] bg-[#111318] shrink-0">
-        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#4F8EF7] to-[#00C9A7] flex items-center justify-center text-sm font-bold text-white mb-3">R</div>
-        {NAV.map(n => (
-          <NavLink key={n.to} to={n.to} className={({ isActive }) =>
-            `w-10 h-10 rounded-lg flex items-center justify-center text-base transition-all border ${isActive ? 'border-[#00C9A7] bg-[#00C9A720] text-[#00C9A7]' : 'border-transparent text-[#454E66] hover:text-[#8891A8]'}`
-          } title={n.label}>
-            {n.icon}
-          </NavLink>
-        ))}
-      </div>
-      <div className="flex-1 overflow-hidden flex flex-col">
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <div className="app-brand">
+          <div className="app-brand-mark">
+            <Sparkles size={20} />
+          </div>
+          <div className="app-brand-text">
+            <div className="app-brand-title">Financial Intelligence Suite</div>
+          </div>
+        </div>
+
+        <nav className="app-nav" aria-label="Primary">
+          {NAV.map(({ to, label, description, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              title={`${label} — ${description}`}
+              data-tooltip={label}
+              className={({ isActive }) => `app-nav-link${isActive ? ' active' : ''}`}
+            >
+              <span className="app-nav-icon">
+                <Icon size={18} />
+              </span>
+              <span className="app-nav-meta">
+                <span className="app-nav-label">{label}</span>
+                <span className="app-nav-copy">{description}</span>
+              </span>
+            </NavLink>
+          ))}
+        </nav>
+
+        <button
+          type="button"
+          className="app-theme-toggle"
+          onClick={toggleTheme}
+          title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          data-tooltip={isDark ? 'Light mode' : 'Dark mode'}
+        >
+          <span className="app-nav-icon">
+            {isDark ? <SunMedium size={18} /> : <Moon size={18} />}
+          </span>
+          <span className="app-nav-meta">
+            <span className="app-nav-label">{isDark ? 'Light Mode' : 'Dark Mode'}</span>
+          </span>
+        </button>
+      </aside>
+
+      <main className="app-main">
         <Outlet />
-      </div>
+      </main>
     </div>
   );
 }

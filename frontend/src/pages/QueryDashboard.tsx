@@ -1,348 +1,268 @@
-import { useState, useRef, useEffect } from 'react';
-import { queryRAG, logQueryToEval } from '../services/api';
-import { isLikelyIrrelevantToCorpus, OFF_TOPIC_REPLY } from '../utils/queryRelevance';
-import { displayNeo4jDocs, displayChromaChunks } from '../utils/chatStatsDisplay';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import NeoGraphViewer from '../components/NeoGraphViewer';
+import { logQueryToEval, queryRAG } from '../services/api';
+import { useTheme } from '../theme';
+import { displayChromaChunks, displayNeo4jDocs } from '../utils/chatStatsDisplay';
+import { OFF_TOPIC_REPLY, isLikelyIrrelevantToCorpus } from '../utils/queryRelevance';
 
-const C = { bg: '#0A0C10', surface: '#111318', card: '#161A22', border: '#1E2330', teal: '#00C9A7', blue: '#4F8EF7', amber: '#F5A623', red: '#F26D6D', green: '#4ADE80', purple: '#A78BFA', text: '#E8EAF0', textMid: '#8891A8', textDim: '#454E66' };
+const darkTheme = {
+  bg: '#07111F',
+  surface: 'rgba(10, 22, 38, 0.92)',
+  card: 'rgba(13, 27, 46, 0.94)',
+  cardSoft: 'rgba(9, 20, 35, 0.78)',
+  border: 'rgba(148, 163, 184, 0.18)',
+  blue: '#4DA2FF',
+  teal: '#34C79A',
+  amber: '#F4B860',
+  red: '#F27A7A',
+  text: '#EFF4FB',
+  textMid: '#94A9C7',
+  textDim: '#6E84A3',
+};
 
-const STEPS = [
-  { id: 'neo4j', label: 'Neo4j Graph', color: C.blue },
-  { id: 'chromadb', label: 'ChromaDB Search', color: C.teal },
-  { id: 'duckdb', label: 'DuckDB Signals', color: C.purple },
-  { id: 'llm', label: 'LLM Synthesis', color: C.amber },
+const lightTheme = {
+  bg: '#F3F7FC',
+  surface: 'rgba(255, 255, 255, 0.92)',
+  card: 'rgba(255, 255, 255, 0.98)',
+  cardSoft: 'rgba(240, 245, 252, 0.94)',
+  border: 'rgba(130, 146, 166, 0.22)',
+  blue: '#2F7FE7',
+  teal: '#1FA37A',
+  amber: '#C68A2D',
+  red: '#D45C5C',
+  text: '#102033',
+  textMid: '#506580',
+  textDim: '#7A8BA1',
+};
+
+const QUICK = [
+  "What was AMD's revenue in 2021?",
+  'Compare Microsoft and Apple risk factors',
+  "Explain Netflix's growth strategy",
 ];
 
-const QUICK = ["What was AMD's revenue in 2021?", "Compare Microsoft and Apple risk factors", "Explain Netflix's growth strategy"];
+type PipelineStatus = 'done' | 'active' | 'pending' | 'skipped';
 
-type Msg = { role: 'user' | 'bot'; text: string; sources?: any[]; citations?: string[]; stats?: any; query?: string; graphs?: any[]; neoGraphNodes?: any[]; neoGraphEdges?: any[]; timestamp?: number };
+type PipelineStep = {
+  label: string;
+  status: PipelineStatus;
+  detail?: string;
+};
 
-type GraphType = 'line' | 'bar' | 'heatmap' | 'gauge';
+type Msg = {
+  role: 'user' | 'bot';
+  text: string;
+  sources?: any[];
+  citations?: string[];
+  stats?: any;
+  query?: string;
+  neoGraphNodes?: any[];
+  neoGraphEdges?: any[];
+  timestamp?: number;
+  pipeline?: PipelineStep[];
+  error?: boolean;
+  agents_called?: string[];
+  analysis?: any;
+  visualizations?: any[];
+  planner_reasoning?: string;
+};
+
+function buildPipeline({
+  hasSources,
+  hasGraph,
+  hasSignals,
+  citationsCount,
+  currentStage,
+}: {
+  hasSources: boolean;
+  hasGraph: boolean;
+  hasSignals: boolean;
+  citationsCount: number;
+  currentStage?: 'retrieval' | 'graph' | 'signals' | 'synthesis';
+}): PipelineStep[] {
+  const activeIf = (stage: 'retrieval' | 'graph' | 'signals' | 'synthesis') =>
+    currentStage === stage ? 'active' : 'pending';
+
+  if (currentStage) {
+    return [
+      {
+        label: 'Retrieve context',
+        status: currentStage === 'retrieval' ? 'active' : 'done',
+      },
+      {
+        label: 'Graph lookup',
+        status:
+          currentStage === 'graph'
+            ? 'active'
+            : currentStage === 'signals' || currentStage === 'synthesis'
+              ? 'done'
+              : activeIf('graph'),
+      },
+      {
+        label: 'Extract signals',
+        status:
+          currentStage === 'signals'
+            ? 'active'
+            : currentStage === 'synthesis'
+              ? 'done'
+              : activeIf('signals'),
+      },
+      {
+        label: 'Synthesize answer',
+        status: currentStage === 'synthesis' ? 'active' : activeIf('synthesis'),
+      },
+    ];
+  }
+
+  return [
+    {
+      label: 'Retrieve context',
+      status: hasSources ? 'done' : 'skipped',
+      detail: hasSources ? `${citationsCount} source references` : 'No supporting retrieval returned',
+    },
+    {
+      label: 'Graph lookup',
+      status: hasGraph ? 'done' : 'skipped',
+      detail: hasGraph ? 'Graph context loaded' : 'No graph context used',
+    },
+    {
+      label: 'Extract signals',
+      status: hasSignals ? 'done' : 'skipped',
+      detail: hasSignals ? 'Structured signal data available' : 'No structured signals detected',
+    },
+    {
+      label: 'Synthesize answer',
+      status: 'done',
+      detail: 'Response generated from retrieved evidence',
+    },
+  ];
+}
+
+function statusColors(
+  status: PipelineStatus,
+  theme: typeof darkTheme,
+) {
+  if (status === 'done') {
+    return {
+      background: 'rgba(52, 199, 154, 0.14)',
+      border: 'rgba(52, 199, 154, 0.28)',
+      color: theme.teal,
+    };
+  }
+  if (status === 'active') {
+    return {
+      background: 'rgba(77, 162, 255, 0.16)',
+      border: 'rgba(77, 162, 255, 0.32)',
+      color: theme.blue,
+    };
+  }
+  if (status === 'skipped') {
+    return {
+      background: 'rgba(148, 163, 184, 0.08)',
+      border: 'rgba(148, 163, 184, 0.2)',
+      color: theme.textDim,
+    };
+  }
+  return {
+    background: 'rgba(148, 163, 184, 0.06)',
+    border: 'rgba(148, 163, 184, 0.18)',
+    color: theme.textMid,
+  };
+}
+
+function buildAnalysis(msg: Msg, theme: typeof darkTheme) {
+  const stats = msg.stats || {};
+  const chunks = displayChromaChunks(stats.chromadb_chunks || 0);
+  const graphDocs = displayNeo4jDocs(stats.neo4j_documents || 0);
+  const signals = stats.duckdb_signals || 0;
+  const citations = msg.citations?.length || 0;
+  const graphNodes = msg.neoGraphNodes?.length || 0;
+
+  return [
+    {
+      label: 'Evidence',
+      value: citations > 0 ? `${citations} cited source${citations > 1 ? 's' : ''}` : 'No citations',
+      tone: citations > 0 ? theme.blue : theme.textDim,
+    },
+    {
+      label: 'Vector retrieval',
+      value: `${chunks} chunks`,
+      tone: theme.teal,
+    },
+    {
+      label: 'Graph context',
+      value: graphNodes > 0 ? `${graphNodes} nodes loaded` : `${graphDocs} graph docs`,
+      tone: graphNodes > 0 ? theme.blue : theme.textMid,
+    },
+    {
+      label: 'DuckDB signals',
+      value: signals > 0 ? `${signals} signals` : 'No signal hits',
+      tone: signals > 0 ? theme.amber : theme.textDim,
+    },
+  ];
+}
 
 export default function QueryDashboard() {
+  const { isDark } = useTheme();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [showOptions, setShowOptions] = useState(false);
-  const [generateReport, setGenerateReport] = useState(false);
-  const [selectedGraphs, setSelectedGraphs] = useState<GraphType[]>([]);
+  const [analysisIncluded, setAnalysisIncluded] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [showTraceback, setShowTraceback] = useState<number | null>(null);
+  const [showGraphPanel, setShowGraphPanel] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const theme = isDark ? darkTheme : lightTheme;
 
-  useEffect(() => { ref.current?.scrollTo(0, ref.current.scrollHeight); }, [messages]);
+  useEffect(() => {
+    ref.current?.scrollTo(0, ref.current.scrollHeight);
+  }, [messages, loading]);
 
-  const toggleGraph = (type: GraphType) => {
-    setSelectedGraphs(prev => 
-      prev.includes(type) ? prev.filter(g => g !== type) : [...prev, type]
-    );
-  };
+  const graphMessage = useMemo(
+    () =>
+      [...messages]
+        .reverse()
+        .find((message) => message.role === 'bot' && (message.neoGraphNodes?.length || 0) > 0),
+    [messages],
+  );
 
-  // Generate realistic financial data
-  const generateFinancialData = () => {
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const revenue = Array.from({ length: 12 }, () => Math.floor(Math.random() * 50) + 20);
-    const companies = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA'];
-    const years = [2020, 2021, 2022, 2023, 2024];
-    
-    return { months, revenue, companies, years };
-  };
-
-  const generateGraphImage = (graphType: GraphType): string => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 700;
-    canvas.height = 350;
-    const ctx = canvas.getContext('2d');
-    
-    if (!ctx) return '';
-    
-    const financialData = generateFinancialData();
-    
-    // Background
-    ctx.fillStyle = '#161A22';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw grid background
-    ctx.strokeStyle = '#1E233033';
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 5; i++) {
-      const y = 40 + i * 60;
-      ctx.beginPath();
-      ctx.moveTo(60, y);
-      ctx.lineTo(canvas.width - 20, y);
-      ctx.stroke();
+  const send = async (prefill?: string) => {
+    const query = (prefill || input).trim();
+    if (!query || loading) {
+      return;
     }
-    
-    // Axes and labels
-    ctx.strokeStyle = C.textDim;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(60, 40);
-    ctx.lineTo(60, 320);
-    ctx.lineTo(canvas.width - 20, 320);
-    ctx.stroke();
-    
-    ctx.fillStyle = C.textMid;
-    ctx.font = 'bold 12px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Time Period →', canvas.width / 2, canvas.height - 5);
-    
-    ctx.save();
-    ctx.translate(15, 180);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center';
-    ctx.fillText('Revenue (Millions $) →', 0, 0);
-    ctx.restore();
-    
-    switch(graphType) {
-      case 'line': {
-        // Line chart - Revenue trend
-        ctx.strokeStyle = C.blue;
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        
-        const chartWidth = canvas.width - 80;
-        const chartHeight = 280;
-        const pointSpacing = chartWidth / (financialData.months.length - 1);
-        
-        financialData.months.forEach((_, i) => {
-          const x = 60 + i * pointSpacing;
-          const y = 320 - (financialData.revenue[i] / 70) * chartHeight;
-          
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-        
-        // Draw points and values
-        ctx.fillStyle = C.blue;
-        financialData.months.forEach((_, i) => {
-          const x = 60 + i * pointSpacing;
-          const y = 320 - (financialData.revenue[i] / 70) * chartHeight;
-          
-          // Point circle
-          ctx.beginPath();
-          ctx.arc(x, y, 4, 0, Math.PI * 2);
-          ctx.fill();
-          
-          // Value label
-          ctx.fillStyle = C.green;
-          ctx.font = 'bold 10px Arial';
-          ctx.textAlign = 'center';
-          ctx.fillText(`$${financialData.revenue[i]}M`, x, y - 12);
-          ctx.fillStyle = C.blue;
-        });
-        
-        // X-axis labels (months)
-        ctx.fillStyle = C.textDim;
-        ctx.font = '11px Arial';
-        ctx.textAlign = 'center';
-        financialData.months.forEach((month, i) => {
-          const x = 60 + i * pointSpacing;
-          if (i % 2 === 0) ctx.fillText(month, x, 340);
-        });
-        
-        // Y-axis labels
-        ctx.font = '10px Arial';
-        ctx.textAlign = 'right';
-        for (let i = 0; i <= 5; i++) {
-          const value = Math.floor((i * 70) / 5);
-          const y = 320 - i * 56;
-          ctx.fillText(`$${value}M`, 55, y + 4);
-        }
-        break;
-      }
-      
-      case 'bar': {
-        // Bar chart - Company comparison
-        const barWidth = 50;
-        const spacing = 80;
-        ctx.fillStyle = C.teal;
-        
-        financialData.companies.forEach((company, i) => {
-          const value = Math.floor(Math.random() * 70) + 10;
-          const x = 80 + i * spacing;
-          const barHeight = (value / 80) * 240;
-          const y = 320 - barHeight;
-          
-          // Bar
-          ctx.fillRect(x, y, barWidth, barHeight);
-          
-          // Value on bar
-          ctx.fillStyle = C.green;
-          ctx.font = 'bold 11px Arial';
-          ctx.textAlign = 'center';
-          ctx.fillText(`$${value}M`, x + barWidth / 2, y - 5);
-          
-          // Company label
-          ctx.fillStyle = C.textDim;
-          ctx.font = '11px Arial';
-          ctx.fillText(company, x + barWidth / 2, 340);
-          
-          ctx.fillStyle = C.teal;
-        });
-        
-        // Y-axis labels
-        ctx.fillStyle = C.textMid;
-        ctx.font = '10px Arial';
-        ctx.textAlign = 'right';
-        for (let i = 0; i <= 4; i++) {
-          const value = Math.floor((i * 80) / 4);
-          const y = 320 - i * 60;
-          ctx.fillText(`$${value}M`, 55, y + 4);
-        }
-        break;
-      }
-      
-      case 'heatmap': {
-        // Heatmap - Company vs Year
-        const companies = ['AAPL', 'MSFT', 'GOOGL', 'AMZN'];
-        const years = ['2020', '2021', '2022', '2023', '2024'];
-        const cellSize = 50;
-        
-        companies.forEach((_, i) => {
-          years.forEach((_, j) => {
-            const intensity = Math.random() * 100;
-            const hue = Math.floor((intensity / 100) * 120); // 0-120 (red to green)
-            ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
-            
-            const x = 80 + j * cellSize;
-            const y = 60 + i * cellSize;
-            ctx.fillRect(x, y, cellSize - 2, cellSize - 2);
-            
-            // Value in cell
-            ctx.fillStyle = '#000';
-            ctx.font = 'bold 10px Arial';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(`${Math.floor(intensity)}%`, x + cellSize / 2, y + cellSize / 2);
-          });
-        });
-        
-        // X-axis (years)
-        ctx.fillStyle = C.textDim;
-        ctx.font = '11px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        years.forEach((year, j) => {
-          const x = 80 + j * cellSize;
-          ctx.fillText(year, x + cellSize / 2, 340);
-        });
-        
-        // Y-axis (companies)
-        ctx.font = '11px Arial';
-        ctx.textAlign = 'right';
-        ctx.textBaseline = 'middle';
-        companies.forEach((co, i) => {
-          const y = 60 + i * cellSize;
-          ctx.fillText(co, 55, y + cellSize / 2);
-        });
-        
-        // Legend
-        ctx.fillStyle = C.textDim;
-        ctx.font = '9px Arial';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText('0%', 620, 60);
-        ctx.fillText('100%', 620, 280);
-        break;
-      }
-      
-      case 'gauge': {
-        // Gauge chart - Risk/Growth metric
-        const value = Math.floor(Math.random() * 100);
-        const startAngle = Math.PI;
-        const endAngle = 2 * Math.PI;
-        const currentAngle = startAngle + (value / 100) * (endAngle - startAngle);
-        
-        const centerX = canvas.width / 2;
-        const centerY = 200;
-        const radius = 80;
-        
-        // Background arc
-        ctx.strokeStyle = C.border;
-        ctx.lineWidth = 20;
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, radius, startAngle, endAngle);
-        ctx.stroke();
-        
-        // Progress arc
-        const color = value > 70 ? C.green : value > 40 ? C.amber : C.red;
-        ctx.strokeStyle = color;
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, radius, startAngle, currentAngle);
-        ctx.stroke();
-        
-        // Needle
-        const needleX = centerX + radius * Math.cos(currentAngle - Math.PI / 2);
-        const needleY = centerY + radius * Math.sin(currentAngle - Math.PI / 2);
-        ctx.strokeStyle = C.text;
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(centerX, centerY);
-        ctx.lineTo(needleX, needleY);
-        ctx.stroke();
-        
-        // Center circle
-        ctx.fillStyle = '#161A22';
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, 10, 0, Math.PI * 2);
-        ctx.fill();
-        
-        // Value display
-        ctx.fillStyle = color;
-        ctx.font = 'bold 32px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`${value}%`, centerX, centerY + 50);
-        
-        // Label
-        ctx.fillStyle = C.textMid;
-        ctx.font = '12px Arial';
-        ctx.fillText('Growth Score', centerX, centerY + 80);
-        
-        // Range labels
-        ctx.font = '10px Arial';
-        ctx.fillStyle = C.textDim;
-        ctx.textAlign = 'center';
-        ctx.fillText('Low', centerX - 90, centerY + 20);
-        ctx.fillText('High', centerX + 90, centerY + 20);
-        break;
-      }
-    }
-    
-    return canvas.toDataURL();
-  };
 
-  const send = async (q?: string) => {
-    const query = q || input.trim();
-    if (!query || loading) return;
-    
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: query, timestamp: Date.now() }]);
-    setShowOptions(false);
+    setMessages((prev) => [...prev, { role: 'user', text: query, timestamp: Date.now() }]);
 
     if (isLikelyIrrelevantToCorpus(query)) {
-      setMessages(prev => [...prev, { role: 'bot', text: OFF_TOPIC_REPLY, timestamp: Date.now() }]);
+      const offTopic = {
+        role: 'bot' as const,
+        text: OFF_TOPIC_REPLY,
+        query,
+        timestamp: Date.now(),
+        pipeline: buildPipeline({
+          hasSources: false,
+          hasGraph: false,
+          hasSignals: false,
+          citationsCount: 0,
+        }),
+      };
+      setMessages((prev) => [...prev, offTopic]);
       return;
     }
 
     setLoading(true);
 
     try {
-      const { data } = await queryRAG(query);
-      
-      // Log query to evals
-      try {
-        await logQueryToEval(query, data.answer || '', data.sources || []);
-      } catch (e) {
-        console.log('Eval logging skipped:', e);
-      }
-      
-      // Fetch Neo4j graph data if sources exist
-      let neoGraphNodes = [];
-      let neoGraphEdges = [];
-      
+      const { data } = await queryRAG(query, analysisIncluded);
+      const stats = data.stats || {};
+
+      // Eval metrics are now logged inline by /api/query — no separate call needed
+
+      let neoGraphNodes: any[] = [];
+      let neoGraphEdges: any[] = [];
+
       if (data.sources && data.sources.length > 0) {
         try {
           const companies = data.companies || [];
@@ -350,395 +270,484 @@ export default function QueryDashboard() {
             const graphRes = await fetch('http://localhost:5001/api/neo4j-graph', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                company: company,
-                limit: 30
-              })
+              body: JSON.stringify({ company, limit: 30 }),
             });
             const graphData = await graphRes.json();
             if (graphData.nodes && graphData.edges) {
-              neoGraphNodes.push(...graphData.nodes);
-              neoGraphEdges.push(...graphData.edges);
+              neoGraphNodes = [...neoGraphNodes, ...graphData.nodes];
+              neoGraphEdges = [...neoGraphEdges, ...graphData.edges];
             }
           }
-        } catch (err) {
-          console.log('Graph fetch skipped:', err);
+        } catch (error) {
+          console.log('Graph fetch skipped:', error);
         }
       }
-      
-      // Generate graphs if selected
-      const graphs = selectedGraphs.map(type => ({
-        type,
-        image: generateGraphImage(type),
-        label: type.charAt(0).toUpperCase() + type.slice(1) + ' Chart'
-      }));
 
-      setMessages(prev => [...prev, {
-        role: 'bot', 
+      const agentsCalled: string[] = data.agents_called || [];
+
+      const botMessage: Msg = {
+        role: 'bot',
         text: data.answer || 'No answer generated.',
-        sources: data.sources, 
-        citations: data.citations, 
-        stats: data.stats,
-        query: query,
-        graphs: graphs.length > 0 ? graphs : undefined,
+        sources: data.sources,
+        citations: data.citations,
+        stats,
+        query,
         neoGraphNodes,
         neoGraphEdges,
         timestamp: Date.now(),
-      }]);
-    } catch (e: any) {
-      setMessages(prev => [...prev, { role: 'bot', text: `Error: ${e.message}`, timestamp: Date.now() }]);
+        agents_called: agentsCalled,
+        analysis: data.analysis,
+        visualizations: data.visualizations,
+        planner_reasoning: data.planner_reasoning,
+        pipeline: agentsCalled.map((agent: string) => ({
+          label: agent.charAt(0).toUpperCase() + agent.slice(1),
+          status: 'done' as PipelineStatus,
+          detail: agent === 'planner' ? (data.planner_reasoning || 'Routed query')
+            : agent === 'retriever' ? `${stats.chromadb_chunks || 0} chunks retrieved`
+            : agent === 'analyst' ? (data.analysis ? 'Analysis complete' : 'No data to analyze')
+            : agent === 'visualizer' ? `${(data.visualizations || []).length} chart(s) generated`
+            : agent,
+        })),
+      };
+
+      setMessages((prev) => [...prev, botMessage]);
+    } catch (error: any) {
+      const errorMessage: Msg = {
+        role: 'bot',
+        text: `Error: ${error.message}`,
+        query,
+        timestamp: Date.now(),
+        error: true,
+        pipeline: [
+          { label: 'Retrieve context', status: 'done' },
+          { label: 'Synthesize answer', status: 'skipped', detail: 'Request failed before completion' },
+        ],
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setLoading(false);
     }
-    
-    setLoading(false);
   };
 
   return (
-    <div className="flex flex-col h-full" style={{ background: '#000' }}>
-      {/* Header - Clean like ChatGPT */}
-      <div className="border-b px-6 py-3.5 flex items-center justify-between" style={{ borderColor: '#333', background: '#000' }}>
+    <div
+      className="flex h-full min-h-0 flex-col overflow-hidden"
+      style={{
+        background: isDark
+          ? 'radial-gradient(circle at top right, rgba(77, 162, 255, 0.12), transparent 24%), #07111F'
+          : 'radial-gradient(circle at top right, rgba(47, 127, 231, 0.1), transparent 24%), #F3F7FC',
+      }}
+    >
+      <div
+        className="flex items-center justify-between border-b px-8 py-5"
+        style={{ borderColor: theme.border, background: theme.surface, backdropFilter: 'blur(16px)' }}
+      >
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-teal-500 flex items-center justify-center text-white font-bold text-sm">F</div>
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-teal-400 text-sm font-bold text-white shadow-lg">
+            F
+          </div>
           <div>
-            <h1 className="text-base font-semibold" style={{ color: '#fff' }}>Financial RAG Assistant</h1>
-            <p className="text-xs" style={{ color: '#999' }}>Powered by Neo4j + ChromaDB + DuckDB</p>
+            <h1 className="text-lg font-semibold" style={{ color: theme.text }}>
+              Financial RAG Assistant
+            </h1>
+            
           </div>
         </div>
+
         <div className="flex items-center gap-2">
-          <button 
-            onClick={() => setShowHistory(!showHistory)}
-            className="p-2 rounded-lg transition-colors"
-            style={{ color: '#999' }}
-            title="History"
+          <button
+            onClick={() => setShowHistory((prev) => !prev)}
+            className="rounded-xl border px-3 py-2 text-sm transition-all"
+            style={{
+              color: showHistory ? '#fff' : theme.textMid,
+              background: showHistory ? theme.blue : theme.card,
+              borderColor: theme.border,
+            }}
           >
-            📜
+            History
           </button>
-          <button onClick={() => { setMessages([]); setShowHistory(false); }} className="p-2 rounded-lg transition-colors" style={{ color: '#999' }}>
-            ⟳
+          <button
+            onClick={() => {
+              setMessages([]);
+              setShowHistory(false);
+              setShowGraphPanel(false);
+            }}
+            className="rounded-xl border px-3 py-2 text-sm transition-all hover:opacity-80"
+            style={{ color: theme.textMid, background: theme.card, borderColor: theme.border }}
+          >
+            Clear
           </button>
         </div>
       </div>
 
-      {/* Main Chat Area */}
-      <div className="flex-1 overflow-hidden flex gap-4" style={{ background: '#000' }}>
-        {/* History Sidebar */}
-        {showHistory && (
-          <div className="w-60 border-r overflow-y-auto flex flex-col shrink-0" style={{ borderColor: '#333', background: '#000' }}>
-            <div className="sticky top-0 px-4 py-3 border-b" style={{ borderColor: '#333', background: '#000' }}>
-              <h3 className="text-sm font-semibold" style={{ color: '#fff' }}>History</h3>
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {showHistory ? (
+          <aside
+            className="w-72 shrink-0 overflow-y-auto border-r"
+            style={{ borderColor: theme.border, background: theme.surface }}
+          >
+            <div className="sticky top-0 border-b px-4 py-4" style={{ borderColor: theme.border, background: theme.card }}>
+              <h2 className="text-sm font-semibold" style={{ color: theme.text }}>
+                Recent prompts
+              </h2>
             </div>
-            <div className="flex-1 space-y-1 p-3">
-              {messages.filter(m => m.role === 'user').map((msg, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    setInput(msg.text);
-                    setShowHistory(false);
-                  }}
-                  className="w-full px-3 py-2 rounded-lg text-xs text-left transition-colors"
-                  style={{ color: '#ccc' }}
-                  title={msg.text}
-                >
-                  <div className="truncate font-medium" style={{ color: '#fff' }}>{msg.text.substring(0, 40)}</div>
-                  <div className="text-[10px] mt-1" style={{ color: '#666' }}>
-                    {msg.timestamp && new Date(msg.timestamp).toLocaleTimeString()}
-                  </div>
-                </button>
-              ))}
+            <div className="space-y-2 p-3">
+              {messages.filter((message) => message.role === 'user').length === 0 ? (
+                <div className="rounded-2xl border p-4 text-sm" style={{ borderColor: theme.border, color: theme.textDim }}>
+                  No prompts yet.
+                </div>
+              ) : (
+                messages
+                  .filter((message) => message.role === 'user')
+                  .map((message, index) => (
+                    <div
+                      key={`${message.timestamp}-${index}`}
+                      className="rounded-2xl border px-4 py-3"
+                      style={{ borderColor: theme.border, background: theme.cardSoft }}
+                    >
+                      <p className="line-clamp-2 text-sm font-medium" style={{ color: theme.text }}>
+                        {message.text}
+                      </p>
+                      <p className="mt-2 text-xs" style={{ color: theme.textDim }}>
+                        {message.timestamp ? new Date(message.timestamp).toLocaleTimeString() : ''}
+                      </p>
+                    </div>
+                  ))
+              )}
             </div>
-          </div>
-        )}
+          </aside>
+        ) : null}
 
-        {/* Messages Container */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div ref={ref} className="flex-1 overflow-y-auto flex flex-col gap-6 p-6">
-            {/* Empty State */}
-            {messages.length === 0 && (
-              <div className="flex-1 flex flex-col items-center justify-center gap-6">
-                <div className="w-20 h-20 rounded-full bg-gradient-to-br from-blue-500 to-teal-500 flex items-center justify-center text-4xl">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div ref={ref} id="chat" className="flex-1 overflow-y-auto px-8 py-8 pb-8">
+            {messages.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-8">
+                <div className="flex h-20 w-20 items-center justify-center rounded-[28px] bg-gradient-to-br from-blue-500 to-teal-400 text-5xl shadow-xl">
                   📊
                 </div>
-                <div className="text-center max-w-md">
-                  <h2 className="text-2xl font-semibold mb-2" style={{ color: '#fff' }}>Financial Intelligence Assistant</h2>
-                  <p className="mb-6" style={{ color: '#999' }}>Ask questions about revenue trends, company comparisons, growth metrics, and more.</p>
-                  <div className="flex flex-col gap-2">
-                    {QUICK.map((q, i) => (
-                      <button 
-                        key={i} 
-                        onClick={() => send(q)} 
-                        className="px-4 py-2.5 text-sm border rounded-lg transition-colors text-left"
-                        style={{ color: '#ccc', borderColor: '#333', background: '#111' }}
+                <div className="max-w-xl text-center">
+                  <h2 className="mb-3 text-3xl font-bold" style={{ color: theme.text }}>
+                    Ask one focused question at a time
+                  </h2>
+                  <p className="mb-6 text-sm leading-7" style={{ color: theme.textDim }}>
+                    The assistant will answer, show the evidence footprint, and expose the pipeline
+                    used for that specific prompt.
+                  </p>
+                  <div className="flex flex-col gap-3">
+                    {QUICK.map((question) => (
+                      <button
+                        key={question}
+                        onClick={() => send(question)}
+                        className="rounded-2xl border px-5 py-4 text-left text-sm transition-all hover:-translate-y-0.5"
+                        style={{
+                          color: theme.textMid,
+                          borderColor: theme.border,
+                          background: theme.card,
+                        }}
                       >
-                        {q}
+                        {question}
                       </button>
                     ))}
                   </div>
                 </div>
               </div>
-            )}
-
-            {/* Messages */}
-            {messages.map((m, i) => (
-              <div key={i} className={`flex gap-4 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                {/* Bot Avatar */}
-                {m.role === 'bot' && (
-                  <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold text-white mt-0.5 flex-shrink-0">
-                    F
-                  </div>
-                )}
-
-               {/* Message Content */}
-                <div className={`max-w-2xl flex flex-col gap-3 ${m.role === 'user' ? '' : ''}`}>
-                  {/* Text Message */}
-                  <div className={`rounded-lg px-4 py-3 ${m.role === 'user' ? 'bg-blue-500 text-white rounded-br-none' : 'rounded-bl-none'}`} style={m.role === 'bot' ? { background: '#111', borderColor: '#333', border: '1px solid #333', color: '#fff' } : {}}>
-                    <p className="text-sm leading-relaxed">{m.text}</p>
-                  </div>
-
-                  {/* Graphs with Metrics */}
-                  {m.graphs && m.graphs.length > 0 && (
-                    <div className="space-y-3 w-full">
-                      {m.graphs.map((graph, j) => (
-                        <div key={j} className="rounded-lg overflow-hidden shadow-sm hover:shadow-md transition-shadow border" style={{ background: '#111', borderColor: '#333' }}>
-                          {/* Graph Title */}
-                          <div className="px-4 py-3 border-b" style={{ background: '#1a1a1a', borderColor: '#333' }}>
-                            <h4 className="text-sm font-semibold" style={{ color: '#fff' }}>
-                              {graph.type === 'line' && '📈 Revenue Trend'} 
-                              {graph.type === 'bar' && '📊 Company Comparison'}
-                              {graph.type === 'heatmap' && '🔥 Performance Matrix'}
-                              {graph.type === 'gauge' && '📌 Growth Score'}
-                            </h4>
-                          </div>
-
-                          {/* Graph + Metrics Side by Side */}
-                          <div className="flex">
-                            {/* Graph */}
-                            <div className="flex-1 p-4" style={{ background: '#0a0a0a' }}>
-                              <img src={graph.image} alt={graph.label} className="w-full h-auto rounded" />
-                            </div>
-
-                            {/* Metrics Panel */}
-                            <div className="w-48 border-l p-4 space-y-3 overflow-y-auto" style={{ background: '#111', borderColor: '#333' }}>
-                              {graph.type === 'line' && (
-                                <>
-                                  <div>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Revenue Metrics</p>
-                                    <p className="text-lg font-bold mt-1" style={{ color: '#fff' }}>$45.5M</p>
-                                    <p className="text-xs text-green-400">↑ 12.5% avg growth</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Peak</p>
-                                    <p className="text-lg font-bold mt-1" style={{ color: '#fff' }}>$68M</p>
-                                    <p className="text-xs" style={{ color: '#999' }}>Week 10</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Trend</p>
-                                    <p className="text-sm font-semibold text-blue-400">Bullish</p>
-                                  </div>
-                                </>
-                              )}
-                              {graph.type === 'bar' && (
-                                <>
-                                  <div>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Top Company</p>
-                                    <p className="text-lg font-bold mt-1" style={{ color: '#fff' }}>NVDA</p>
-                                    <p className="text-xs" style={{ color: '#999' }}>$72.3M revenue</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Average</p>
-                                    <p className="text-lg font-bold mt-1" style={{ color: '#fff' }}>$48.1M</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Variance</p>
-                                    <p className="text-sm font-semibold text-orange-400">High</p>
-                                  </div>
-                                </>
-                              )}
-                              {graph.type === 'heatmap' && (
-                                <>
-                                  <div>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Best Performer</p>
-                                    <p className="text-lg font-bold mt-1" style={{ color: '#fff' }}>AAPL</p>
-                                    <p className="text-xs" style={{ color: '#999' }}>2024 - 94%</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Trend</p>
-                                    <p className="text-sm font-semibold text-green-400">Improving</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Coverage</p>
-                                    <p className="text-sm" style={{ color: '#ccc' }}>4 cos × 5 yrs</p>
-                                  </div>
-                                </>
-                              )}
-                              {graph.type === 'gauge' && (
-                                <>
-                                  <div>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Score</p>
-                                    <p className="text-lg font-bold mt-1" style={{ color: '#fff' }}>78%</p>
-                                    <p className="text-xs text-green-400">Strong Growth</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Rating</p>
-                                    <p className="text-sm font-semibold text-green-400">✓ Positive</p>
-                                  </div>
-                                  <div className="border-t pt-3" style={{ borderColor: '#333' }}>
-                                    <p className="text-[11px] uppercase tracking-wide" style={{ color: '#666' }}>Action</p>
-                                    <p className="text-sm text-blue-400">Monitor</p>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Citations */}
-                  {m.citations && m.citations.length > 0 && (
-                    <div className="border rounded-lg overflow-hidden" style={{ background: '#111', borderColor: '#333' }}>
-                      <button
-                        onClick={() => setShowTraceback(showTraceback === i ? null : i)}
-                        className="w-full px-4 py-3 flex items-center justify-between transition-colors text-left"
-                        style={{ color: '#fff' }}
+            ) : (
+              <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-end gap-6">
+                {messages.map((msg, index) => (
+                  <div key={`${msg.timestamp}-${index}`} className={msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
+                    {msg.role === 'user' ? (
+                      <div
+                        className="max-w-2xl rounded-[22px] rounded-br-md px-5 py-4 text-sm leading-7 text-white shadow-lg"
+                        style={{ background: theme.blue }}
                       >
-                        <span className="text-sm font-medium">Sources {m.citations.length}</span>
-                        <span style={{ color: '#666' }}>{showTraceback === i ? '▼' : '▶'}</span>
-                      </button>
-                      {showTraceback === i && (
-                        <div className="border-t px-4 py-3 max-h-64 overflow-y-auto space-y-2" style={{ borderColor: '#333', background: '#0a0a0a' }}>
-                          {m.citations.map((c, j) => (
-                            <div key={j} className="text-xs flex gap-2" style={{ color: '#999' }}>
-                              <span className="text-blue-400 flex-shrink-0">→</span>
-                              <span className="break-words">{c}</span>
+                        {msg.text}
+                      </div>
+                    ) : (
+                      <div className="w-full max-w-3xl rounded-[26px] border shadow-lg" style={{ borderColor: theme.border, background: theme.card }}>
+                        <div className="border-b px-5 py-4" style={{ borderColor: theme.border }}>
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-teal-400 text-xs font-bold text-white">
+                                F
+                              </div>
+                              <div>
+                                <div className="text-sm font-semibold" style={{ color: theme.text }}>
+                                  Assistant response
+                                </div>
+                                <div className="text-xs" style={{ color: theme.textDim }}>
+                                  {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
+                                </div>
+                              </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
 
-                  {/* Stats */}
-                  {m.stats && (
-                    <div className="border rounded-lg px-4 py-3" style={{ background: '#111', borderColor: '#333' }}>
-                      <div className="flex gap-6 text-xs">
-                        <div className="flex items-center gap-2">
-                          <p style={{ color: '#666' }}>Neo4j</p>
-                          <p className="font-semibold" style={{ color: '#fff' }}>{displayNeo4jDocs(m.stats.neo4j_docs)} docs</p>
+                            <button
+                              onClick={() => setShowGraphPanel((prev) => !prev)}
+                              disabled={!msg.neoGraphNodes || msg.neoGraphNodes.length === 0}
+                              className="rounded-xl border px-3 py-2 text-xs font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                              style={{
+                                borderColor: theme.border,
+                                background: showGraphPanel ? theme.blue : theme.cardSoft,
+                                color: showGraphPanel ? '#fff' : theme.textMid,
+                              }}
+                            >
+                              {showGraphPanel ? 'Hide graph' : 'Open graph'}
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <p style={{ color: '#666' }}>ChromaDB</p>
-                          <p className="font-semibold" style={{ color: '#fff' }}>{displayChromaChunks(m.stats.chromadb_chunks)} chunks</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <p style={{ color: '#666' }}>DuckDB</p>
-                          <p className="font-semibold" style={{ color: '#fff' }}>{m.stats.duckdb_signals} signals</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <p style={{ color: '#666' }}>Latency</p>
-                          <p className="font-semibold" style={{ color: '#fff' }}>{m.stats.latency}s</p>
+
+                        <div className="px-5 py-5">
+                          <div className="prose prose-invert max-w-none text-sm leading-7" style={{ color: theme.text }}>
+                            <ReactMarkdown>{msg.text}</ReactMarkdown>
+                          </div>
+
+                          {msg.error ? null : (
+                            <div className="mt-5 space-y-4">
+                              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                                {buildAnalysis(msg, theme).map((item) => (
+                                  <div
+                                    key={item.label}
+                                    className="rounded-2xl border px-4 py-4"
+                                    style={{ borderColor: theme.border, background: theme.cardSoft }}
+                                  >
+                                    <div className="text-xs" style={{ color: theme.textDim }}>
+                                      {item.label}
+                                    </div>
+                                    <div className="mt-2 text-sm font-semibold" style={{ color: item.tone }}>
+                                      {item.value}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {msg.pipeline && msg.pipeline.length > 0 ? (
+                                <div
+                                  className="rounded-2xl border px-4 py-4"
+                                  style={{ borderColor: theme.border, background: theme.cardSoft }}
+                                >
+                                  <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: theme.textDim }}>
+                                    Agents Called
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {msg.pipeline.map((step) => {
+                                      const colors = statusColors(step.status, theme);
+                                      return (
+                                        <div
+                                          key={step.label}
+                                          className="rounded-full border px-3 py-1.5 text-xs font-semibold"
+                                          style={{
+                                            background: colors.background,
+                                            borderColor: colors.border,
+                                            color: colors.color,
+                                          }}
+                                          title={step.detail}
+                                        >
+                                          {step.label}
+                                          {step.detail ? <span style={{ opacity: 0.7 }}> — {step.detail}</span> : null}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  {msg.stats ? (
+                                    <div className="mt-3 flex flex-wrap gap-3 text-xs" style={{ color: theme.textMid }}>
+                                      <span>Neo4j: {msg.stats.neo4j_documents ?? 0} docs</span>
+                                      <span>ChromaDB: {msg.stats.chromadb_chunks ?? 0} chunks</span>
+                                      <span>DuckDB: {msg.stats.duckdb_signals ?? 0} signals</span>
+                                      <span>Latency: {msg.stats.latency_seconds ?? '—'}s</span>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
+
+                              {msg.analysis ? (
+                                <div
+                                  className="rounded-2xl border px-4 py-4"
+                                  style={{ borderColor: theme.border, background: theme.cardSoft }}
+                                >
+                                  <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: theme.textDim }}>
+                                    Analysis Results
+                                  </div>
+                                  {msg.analysis.metrics ? (
+                                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                      {Object.entries(msg.analysis.metrics as Record<string, any>).map(([metric, data]: [string, any]) => (
+                                        <div key={metric} className="rounded-xl border px-3 py-3" style={{ borderColor: theme.border }}>
+                                          <div className="text-xs capitalize" style={{ color: theme.textDim }}>{metric.replace(/_/g, ' ')}</div>
+                                          {data.values ? (
+                                            <div className="mt-1 space-y-1">
+                                              {Object.entries(data.values as Record<string, number>).map(([co, val]: [string, any]) => (
+                                                <div key={co} className="flex justify-between text-sm" style={{ color: co === data.leader ? theme.teal : theme.textMid }}>
+                                                  <span>{co}</span>
+                                                  <span className="font-semibold">{typeof val === 'number' ? val.toLocaleString() : val}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : msg.analysis.cagr != null ? (
+                                    <div className="flex flex-wrap gap-4 text-sm" style={{ color: theme.textMid }}>
+                                      <span>CAGR: <strong style={{ color: theme.teal }}>{msg.analysis.cagr}%</strong></span>
+                                      <span>Total growth: <strong style={{ color: theme.teal }}>{msg.analysis.total_growth}%</strong></span>
+                                      <span>Trend: <strong style={{ color: msg.analysis.trend === 'upward' ? theme.teal : theme.red }}>{msg.analysis.trend}</strong></span>
+                                    </div>
+                                  ) : (
+                                    <pre className="text-xs overflow-auto" style={{ color: theme.textMid }}>{JSON.stringify(msg.analysis, null, 2)}</pre>
+                                  )}
+                                </div>
+                              ) : null}
+
+                              {msg.visualizations && msg.visualizations.length > 0 ? (
+                                <div
+                                  className="rounded-2xl border px-4 py-4"
+                                  style={{ borderColor: theme.border, background: theme.cardSoft }}
+                                >
+                                  <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: theme.textDim }}>
+                                    Visualizations ({msg.visualizations.length} chart{msg.visualizations.length > 1 ? 's' : ''})
+                                  </div>
+                                  <div className="space-y-4">
+                                    {msg.visualizations.map((viz: any, vi: number) => (
+                                      <div key={vi}>
+                                        <div className="mb-2 flex items-center gap-2 text-sm font-semibold" style={{ color: theme.text }}>
+                                          <span>{viz.type === 'line' ? '📈' : '📊'}</span>
+                                          <span>{viz.title}</span>
+                                        </div>
+                                        <iframe
+                                          src={`http://localhost:5001/visualizations/${viz.path.split('/').pop()}`}
+                                          className="w-full rounded-xl border"
+                                          style={{ height: '420px', borderColor: theme.border, background: '#fff' }}
+                                          title={viz.title}
+                                        />
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              {msg.citations && msg.citations.length > 0 ? (
+                                <div
+                                  className="rounded-2xl border px-4 py-4"
+                                  style={{ borderColor: theme.border, background: theme.cardSoft }}
+                                >
+                                  <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: theme.textDim }}>
+                                    Sources
+                                  </div>
+                                  <div className="space-y-2">
+                                    {msg.citations.map((citation, citationIndex) => (
+                                      <div
+                                        key={`${citation}-${citationIndex}`}
+                                        className="rounded-xl border px-3 py-3 text-sm"
+                                        style={{ borderColor: theme.border, color: theme.textMid }}
+                                      >
+                                        {citation}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
                         </div>
                       </div>
+                    )}
+                  </div>
+                ))}
+
+                {loading ? (
+                  <div className="flex justify-start">
+                    <div
+                      className="max-w-xl rounded-[22px] rounded-bl-md border px-5 py-4 text-sm"
+                      style={{ borderColor: theme.border, background: theme.card, color: theme.text }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex gap-1">
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-blue-500" />
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-blue-500" style={{ animationDelay: '0.2s' }} />
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-blue-500" style={{ animationDelay: '0.4s' }} />
+                        </div>
+                        <span>Working through the current prompt...</span>
+                      </div>
                     </div>
-                  )}
-
-                  {/* Neo4j Graph Visualization */}
-                  {m.query && m.sources && m.sources.length > 0 && (
-                    <NeoGraphViewer
-                      query={m.query}
-                      nodes={m.neoGraphNodes || []}
-                      edges={m.neoGraphEdges || []}
-                      loading={loading && m === messages[messages.length - 1]}
-                    />
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {/* Loading State */}
-            {loading && (
-              <div className="flex gap-4">
-                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold text-white flex-shrink-0 mt-0.5">
-                  F
-                </div>
-                <div className="border rounded-lg px-4 py-3" style={{ background: '#111', borderColor: '#333' }}>
-                  <div className="flex gap-1">
-                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: '0s' }} />
-                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: '0.2s' }} />
-                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: '0.4s' }} />
                   </div>
-                </div>
+                ) : null}
               </div>
             )}
           </div>
+        </div>
 
-          {/* Input Area */}
-          <div className="border-t px-6 py-4" style={{ borderColor: '#333', background: '#000' }}>
-            {/* Options Panel */}
-            {showOptions && (
-              <div className="mb-4 p-4 border rounded-lg space-y-3" style={{ background: '#111', borderColor: '#333' }}>
-                <div>
-                  <p className="text-xs font-semibold mb-2" style={{ color: '#ccc' }}>Include Visualizations</p>
-                  <div className="flex gap-2 flex-wrap">
-                    {(['line', 'bar', 'heatmap', 'gauge'] as GraphType[]).map(type => (
-                      <button
-                        key={type}
-                        onClick={() => toggleGraph(type)}
-                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors border ${
-                          selectedGraphs.includes(type)
-                            ? 'bg-blue-500 text-white'
-                            : ''
-                        }`}
-                        style={selectedGraphs.includes(type) ? {} : { background: '#1a1a1a', borderColor: '#333', color: '#ccc' }}
-                      >
-                        {type === 'line' && '📈'} {type === 'bar' && '📊'} {type === 'heatmap' && '🔥'} {type === 'gauge' && '📌'}
-                        {' '}{type.charAt(0).toUpperCase() + type.slice(1)}
-                      </button>
-                    ))}
-                  </div>
+        {showGraphPanel && graphMessage ? (
+          <aside
+            className="w-[42rem] max-w-[48vw] shrink-0 border-l"
+            style={{ borderColor: theme.border, background: theme.surface }}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: theme.border }}>
+              <div>
+                <div className="text-sm font-semibold" style={{ color: theme.text }}>
+                  Graph context
                 </div>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={generateReport}
-                    onChange={(e) => setGenerateReport(e.target.checked)}
-                    className="w-4 h-4 rounded"
-                    style={{ borderColor: '#333' }}
-                  />
-                  <span className="text-xs" style={{ color: '#ccc' }}>Generate Report</span>
-                </label>
+                <div className="text-xs" style={{ color: theme.textDim }}>
+                  {graphMessage.query}
+                </div>
               </div>
-            )}
-
-            {/* Input */}
-            <div className="flex gap-3 items-end">
-              <textarea 
-                value={input} 
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Ask about revenue, growth, companies, risks..."
-                className="flex-1 min-h-[44px] max-h-[120px] resize-none px-4 py-2.5 border rounded-lg text-sm outline-none"
-                style={{ background: '#111', borderColor: '#333', color: '#fff' }}
-              />
-              <div className="flex gap-2 items-center">
-                <button 
-                  onClick={() => setShowOptions(!showOptions)}
-                  className="p-2 rounded-lg transition-colors font-semibold"
-                  style={showOptions ? { background: '#333', color: '#4F8EF7' } : { color: '#666' }}
-                  title="Options"
-                >
-                  ⚙
-                </button>
-                <button 
-                  onClick={() => send()} 
-                  disabled={loading || !input.trim()}
-                  className="p-2 rounded-lg text-white transition-colors font-semibold"
-                  style={{ background: (loading || !input.trim()) ? '#666' : '#4F8EF7', cursor: (loading || !input.trim()) ? 'not-allowed' : 'pointer' }}
-                >
-                  ↑
-                </button>
-              </div>
+              <button
+                onClick={() => setShowGraphPanel(false)}
+                className="rounded-lg px-2 py-1 text-sm"
+                style={{ color: theme.textMid }}
+              >
+                Close
+              </button>
             </div>
+            <div className="h-[calc(100%-65px)]">
+              <NeoGraphViewer
+                query={graphMessage.query || ''}
+                nodes={graphMessage.neoGraphNodes || []}
+                edges={graphMessage.neoGraphEdges || []}
+                loading={loading}
+              />
+            </div>
+          </aside>
+        ) : null}
+      </div>
+
+      <div
+        className="border-t px-8 py-6"
+        style={{ borderColor: theme.border, background: theme.surface, backdropFilter: 'blur(16px)' }}
+      >
+        <div className="mx-auto flex max-w-4xl items-end gap-3">
+          <div className="flex-1 flex flex-col gap-2">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  send();
+                }
+              }}
+              placeholder="Ask about a company, filing, trend, or risk factor..."
+              className="w-full min-h-[56px] max-h-[160px] resize-none rounded-2xl border px-4 py-4 text-sm outline-none transition-all"
+              style={{ background: theme.card, borderColor: theme.border, color: theme.text }}
+            />
+            <label className="flex items-center gap-2 text-xs cursor-pointer select-none" style={{ color: theme.textDim }}>
+              <input
+                type="checkbox"
+                checked={analysisIncluded}
+                onChange={(e) => setAnalysisIncluded(e.target.checked)}
+                className="rounded"
+              />
+              Include analysis &amp; visualization
+            </label>
           </div>
+          <button
+            onClick={() => send()}
+            disabled={loading || !input.trim()}
+            className="rounded-2xl px-5 py-4 text-sm font-semibold text-white shadow-lg transition-all"
+            style={{
+              background: loading || !input.trim() ? theme.textDim : theme.blue,
+              cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
+            }}
+          >
+            Send
+          </button>
         </div>
       </div>
     </div>

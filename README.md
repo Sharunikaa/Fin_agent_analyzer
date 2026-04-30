@@ -1,4 +1,4 @@
-# HyperVerge Financial Intelligence Suite
+# Financial Intelligence Suite
 
 A **Retrieval-Augmented Generation (RAG)** stack for financial documents: **extract → chunk & signal → index (Neo4j + ChromaDB + DuckDB)** → **Flask API** with **`smart_retriever`** → **React (Vite)** UI.
 

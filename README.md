@@ -19,15 +19,12 @@ Take one or all three PDFs from your data folder, run through a three-phase pipe
 - [Agents & retrieval](#agents--smart-retrieval)
 - [API (Flask)](#api-endpoints-flask)
 - [Quick start](#quick-start)
-- [Directory structure](#directory-structure)
-- [Environment variables](#environment-variables)
-- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Project Overview
 
-HyperVerge Financial Intelligence Suite is a production-ready **Retrieval-Augmented Generation (RAG)** system designed specifically for financial documents (10-Ks, 10-Qs, annual reports, etc.). It processes PDF documents through a structured pipeline, extracts and indexes content across three specialized systems (Neo4j, ChromaDB, DuckDB), and exposes intelligent query and analytics capabilities through both a REST API and an interactive web dashboard.
+Financial Intelligence Suite is a production-ready **Retrieval-Augmented Generation (RAG)** system designed specifically for financial documents (10-Ks, 10-Qs, annual reports, etc.). It processes PDF documents through a structured pipeline, extracts and indexes content across three specialized systems (Neo4j, ChromaDB, DuckDB), and exposes intelligent query and analytics capabilities through both a REST API and an interactive web dashboard.
 
 **Core workflow:**
 - Ingest PDFs → Extract structure, text, tables, charts → Classify sections and extract financial signals → Index into hybrid storage layers → Query with citations and retrieval metrics
@@ -553,7 +550,7 @@ GEMINI_API_KEY=your_key_here
 NEO4J_URI=neo4j://127.0.0.1:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
-NEO4J_DATABASE=hyperverge-base
+NEO4J_DATABASE=databse_name
 ```
 
 ### Step 3: Run the pipeline (one-time setup)
